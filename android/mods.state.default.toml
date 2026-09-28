@@ -1,0 +1,17 @@
+# Mod choices, written by the in-game menu (Graphics, Enhancements, Cheats).
+# This default is installed on first launch only; app updates keep your file.
+# Android default: widescreen on at 16:9, everything else as shipped (off).
+format_version = 2
+
+[[package]]
+id = "psx.enhancement.widescreen"
+version = "1.0.0"
+enabled = true
+
+[[feature]]
+package_id = "psx.enhancement.widescreen"
+id = "widescreen"
+enabled = true
+
+[feature.values]
+aspect = "16:9"

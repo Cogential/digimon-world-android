@@ -1,0 +1,228 @@
+# Autofilled by tools/new_project_layout/probe_disc.py from your legal dump.
+# Review before shipping. Runtime quirks / overlay seeds still need hand work.
+
+[game]
+name = "Digimon World"
+id = "SLUS-01032"
+players = 1
+exe = "disc/SLUS_010.32"
+# Relative to the project root. Players pick their own dump with the
+# launcher's "Change Disc" button, which records the choice in
+# settings.toml and overrides this default -- so an absolute path here
+# would only ever be right on one machine.
+disc = "disc/Digimon World (USA).cue"
+load_address = "0x80090800"
+entry_pc = "0x800A4240"
+# Header t_size is sector-rounded past the BSS memfill start (0x80134C4C);
+# bound analysis below it -- same fix as the Vice build (framework patch
+# makes the overlap a warning, this keeps the sweep clean).
+text_size = "0x000A4000"
+stack_base = "0x801FFFF0"
+
+# Digests are for data Track 01 (first BINARY FILE / TRACK 01).
+[prepare_disc]
+out_dir = "disc"
+bin_name = "Digimon World (USA).bin"
+cue_name = "Digimon World (USA).cue"
+boot_exe = "SLUS_010.32"
+known_sizes = [381771936]
+known_md5 = [
+  "8520edac0f7f1454f8a008ac5e599c1a",
+]
+known_sha1 = [
+  "5611645da66183e30d11fb6c11a2784ff47e1fdb",
+]
+
+[recompiler]
+# Deep widescreen: emit a plugin entry hook in setPosDataPolyFT4 (the shared
+# FT4 positioner). dw_ws_backdrop.c filters by return address to the two
+# world-anchored callers and squashes backdrop X like the GTE squashes 3D.
+mod_function_entry_funcs = ["0x800E56EC", "0x800EEBDC", "0x800A1F68", "0x800A2810", "0x800B8928", "0x800D78BC", "0x80096F90"]
+# Native function replacement (dw_evolution.c). A listed function opens with
+#   if (psx_mod_function_replace(cpu, ADDR)) return;
+# so a plugin can compute the result, write $v0, publish $ra into cpu->pc and
+# replace the guest body outright.
+#
+# HARD INVARIANT: a function listed here must carry NO code patch from any mod.
+# Patching a body marks its range executable-dirty; dispatch then rejects the
+# compiled form and interprets it instead -- and this hook lives INSIDE the
+# body that was rejected, so it would silently never run. Leaving the guest
+# image byte-identical is exactly what makes the replacement work.
+#
+# 0x800E2544 = getFreshEvolutionTarget, chosen first precisely because it is
+# the one evolution chooser dw.vanilla.roster does NOT patch: 0x54 bytes,
+# fully decompiled, pure. This entry is the proof of the primitive, not the
+# goal -- the other four choosers need their 42 retarget patches deleted first.
+# 0x800D78BC = handleTileUpdate: the backdrop tile-streaming ladder. It cannot
+# be REPLACED -- it has to call updateTileColumn/updateTileRow to stream, and a
+# plugin cannot call a guest function -- but it only READS the camera, so
+# dw_ws_camera.c subtracts the widescreen reveal on entry and restores it on
+# exit. The ladder then picks the tile origin for the WIDE view's left edge with
+# no band edits. The exit half is what mod_function_exit_funcs exists for.
+# 0x800D6A4C = MAIN_func_800D6A4C: map.c has TWO copies of the camera X clamp,
+# and this is the one that is not cameraIsAtEdge. It cannot be replaced (GTE
+# transforms, calls out) but the clamp is its tail, so the widened bound is
+# re-applied on exit. Measuring 20 maps is what caught the omission: every map
+# settling through this path clamped to the vanilla bound and showed an 88-91%
+# left void.
+# 0x800D57EC = renderMap: builds the 12 backdrop tile quads and links them into
+# ot[0xfff]. dw_ws_sliver.c runs on its exit and, whenever the four-column tile
+# ring still falls short of the wide view (at most 41 px on the right), uploads
+# that strip of column T+4 to a VRAM sliver and links up to three more quads
+# into the same bucket -- the fifth column the ring never had room for.
+mod_function_exit_funcs = ["0x800D78BC", "0x800D6A4C", "0x800D57EC"]
+# 0x800FF7F8 = setDigimonRaised and 0x800FF824 = hasDigimonRaised. The roster
+# used to widen one immediate here (sltiu 0x3F -> 0xB4) so the new species got
+# a raised-flag. The id it lands on is species + 0x200, and the space above the
+# vanilla range is NOT free: decoding the shipped scripts finds 88 of the 117
+# widened ids in use, mostly the "Jijimon announced X joined the city" family.
+# The flags are memory-card persistent, so raising a new species silently ate a
+# story scene and, through evolution.c:401, an announcement biased which
+# Digimon the partner evolved into. dw_roster_flags.c replaces both functions
+# and re-banks the new species onto 0x2CD.., which no script touches. The old
+# byte patch is GONE from the manifest and must stay gone: a patched function
+# is refused by native dispatch, and the replacement lives inside the body that
+# would be refused. tools/scan_trigger_ids.py re-runs the audit.
+mod_function_replace_funcs = ["0x800E2544", "0x800D7F68", "0x800FF7F8", "0x800FF824"]
+# 0x800D7F68 = cameraIsAtEdge (map.c:2341-2370): a 212-byte leaf with no calls,
+# and the single per-frame chokepoint for the camera scroll clamp. dw_ws_camera.c
+# widens its X arm by the native-wide reveal so the map edge stays inside the
+# WIDENED frame instead of the 4:3 one, moving DRAWING_OFFSET_X in step so the
+# backdrop cannot slide against the 3D. Returns 0 -- running the stock body --
+# whenever widescreen is off, without touching any guest state.
+# 0x800A1F68/0x800A2810 = loadMMD/loadMMDAsync: dw_roster.c remaps the
+# type argument 114->115 so slot 114 streams Machinedramon's model and
+# texture.
+# 0x800B8928 = renderRectPolyFT4: the shared HUD quad builder. dw_ws_backdrop.c
+# pushes a quad the game PARKED outside the 320-wide frame the rest of the way
+# out of the wide frame, so widgets the game hides off-screen (the clock while a
+# menu is open, the HP/MP bars with no enemy) stay hidden instead of reappearing
+# sliced by the reveal. Identity at 4:3 and in squash mode.
+# 0x80096F90 = GsSortSprite: the clock is one widget drawn as seven pieces, and
+# its needle is a GsSPRITE that never passes through renderRectPolyFT4.
+# dw_ws_backdrop.c decides once per frame whether the WHOLE dial is parked
+# outside the 4:3 frame and moves every piece, needle included, by the same
+# amount -- a per-piece rule left the hand behind in the reveal and split the
+# dial mid-slide on every map change. NOT hooked: renderGameClock itself. Its
+# symbol is 0x800DD2A4 but the recompiler's function starts at 0x800DD2A8 (the
+# compiler hoisted a gp load above the prologue), so an entry hook keyed on the
+# symbol is emitted nowhere and silently never fires; the plugin keys its frame
+# boundary on the ACTIVE_FRAMEBUFFER flip instead.
+# 0x800EEBDC = initializeHeap: runs once, after the BSS memfill, before
+# any table consumer -- dw_roster.c fills its enhancement arena there.
+seeds = "seeds/ghidra_funcs.txt"
+out_dir = "generated"
+strict = true
+
+[runtime]
+window_title = "Digimon World Recompiled"
+memcard_dir = "saves"
+
+# Android: there is no compiler on the phone, so overlays are neither
+# captured nor compiled; they run in the interpreter.
+overlay_cache = false
+
+[video]
+renderer = "software"
+# Widescreen is mod-owned (psx.enhancement.widescreen in the Mods panel);
+# this stays 4:3 and is clamped anyway.
+aspect_ratio = "4:3"
+supersampling = 2
+antialiasing = true
+texture_filtering = "nearest"
+crt_filter = "trinitron"
+# geometry_correction stays OFF: framework-withdrawn, 0.2% coverage measured.
+perspective_texturing = true
+
+[audio]
+spu_hq = true
+
+# Fully-3D title, so it needs the GTE-activity detector.
+#
+# NATIVE-WIDE, not squash. Squash mode compresses a wider field of view into
+# the 320-wide framebuffer and presents it stretched -- which is exactly why
+# menus and the HUD look wrong, and why the UI counter-squash below never
+# worked: it was trying to undo a squash that should not be happening.
+# Native-wide renders the wider view into a genuinely wider framebuffer and
+# presents it 1:1, so that whole artifact class disappears by construction
+# (psxrecomp WIDESCREEN.md, "Strategic direction").
+#
+# Measured on this game, both renderer backends, 14 sampled camera setups
+# across four rooms (tools/dwgame.py enter_game + a fixed walk plan; OpenGL and
+# software agreed to 0.1% on every scene):
+#   * The 4:3 image lands EXACTLY on wide columns 53..372 -- so both 53-column
+#     reveals are genuinely new view, not a stretch.
+#   * Menus, text boxes and the HUD keep native pixel proportions. The item
+#     window measures 301 px in 4:3 and 303 px wide -- it is not squashed and
+#     needs no counter-squash.
+#   * The reveals render live: they track camera motion frame to frame, and the
+#     geometry crosses the old 4:3 edge with no seam. The "stale side strips"
+#     this was rejected for in 0.1.x are not present.
+# The one residual is boundary void: 3 of 14 camera setups show black in the
+# right reveal, because those interiors are only MODELLED as far as the fixed
+# 4:3 camera could ever see -- the set is cut off along the old frustum plane,
+# mid-object. That is missing art, not a cull: other cameras in the same rooms
+# draw content 31 columns past the old edge, which no screen-space clip would
+# allow. Nothing in the renderer can fix it; only new geometry could.
+[widescreen]
+gte_game_mode = true
+# NATIVE-WIDE IS ON. The defects the scene survey found are fixed and measured
+# (research/widescreen-survey/README.md):
+#   * full-screen 2D plates were drawn 320 wide, so every fade left both
+#     reveals lit -- 29.6/0.6/64.9 -> 0.0/0.0/0.0
+#   * widgets the game parks off-screen came back sliced -- the clock now
+#     parks as ONE widget, needle included (dw_ws_backdrop.c)
+#   * the map-edge camera clamp was hardcoded to 320 -- right reveal at a
+#     clamped camera 100% void -> 7.6%
+#   * the four-column backdrop tile ring cannot cover 426 at every alignment
+#     -- the missing strip of the fifth column is now uploaded to a spare VRAM
+#     sliver and drawn with the tiles (dw_ws_sliver.c): 0-3% right void at
+#     all 44 sweep stops where the ring fell short, pixel-aligned
+#   * still open: ~1.2 s of 4:3 after a wild battle (runtime GTE hysteresis)
+native_wide = true
+
+# nw_hud_corners stays OFF (and is not listed). It re-anchors outer-third 2D
+# prims to the true wide corners, which on this game shifts WORLD polygons: it
+# tears two black vertical slabs through the scene and splits the HP/MP bars
+# from their icons. Tested; the screenshot is unambiguous. The HUD sitting
+# inset by the reveal reads as a safe-area HUD and is the better look here.
+
+# The UI counter-squash. This exists only to undo a squash, so under
+# native-wide it has nothing to do and stays off; kept for the squash-mode
+# fallback. The UI layer starts at the game's own DR_OFFSET reset packet,
+# identified by its static address: DRAW_OFFSETS @0x8015DB90, one 12-byte
+# packet per framebuffer (pauseFrame, utils.c -- AddPrim at OT index 32).
+# See research/widescreen-w2-dossier.md for why it never worked.
+ui_offset_squash = false
+ui_offset_packet_addr = "0x8015DB90"
+ui_offset_packet_span = 24
+
+# NOTE ON TABLE ORDER: everything above belongs to [widescreen]. Any
+# [widescreen.cull] subtable must come LAST -- in TOML every key after that
+# header lands in `cull`, so putting it earlier silently reparents
+# ui_offset_* and native_wide and they stop taking effect.
+#
+# There is deliberately no [widescreen.cull] here. auto_screen_x widens the GTE
+# render-funnel screen-extent reject, which it finds by pairing a
+# `sltiu ..,0x140` width compare with a `sltiu ..,0xE0` height compare. This
+# game has NEITHER immediate anywhere: zero `sltiu ..,0x140` in the main EXE or
+# in any of the 16 overlays (only one signed `slti ..,320`, in EAB_REL.BIN).
+# Turning it on emitted zero psx_ws_x_margin() call sites -- byte-identical
+# codegen -- so it was removed rather than left in looking load-bearing.
+# auto_backdrop stays off too: its detector keys on the generic 0x66666667
+# divide-by-10 constant, which occurs 52 times in the EXE alone here, and a
+# false positive corrupts unrelated overlay codegen.
+
+[controller]
+default_mode = "digital"
+# Android: there is no launcher to assign a pad, so player 1 takes the first
+# connected controller (Bluetooth pads may connect after the game starts).
+p1_device = "auto"
+
+# Online mount gate: digests + track count + optional TOC fingerprint
+# (see psxrecomp/docs/NETPLAY.md -- the framework's, not this repo's).
+[netplay]
+require_cue = true
+required_tracks = 1
+# required_disc_fp: intentionally unset -- the Vice value does not describe
+# this disc, and require_cue + required_tracks already gate the mount.

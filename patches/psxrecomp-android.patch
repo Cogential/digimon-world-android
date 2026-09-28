@@ -1,0 +1,2143 @@
+diff --git a/runtime/include/psx_android.h b/runtime/include/psx_android.h
+new file mode 100644
+index 0000000..a233bc8
+--- /dev/null
++++ b/runtime/include/psx_android.h
+@@ -0,0 +1,32 @@
++/*
++ * psx_android.h — Android host glue (see psx_android.cpp).
++ */
++#ifndef PSX_ANDROID_H
++#define PSX_ANDROID_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(__ANDROID__)
++/* Pick the data directory, route stdout/stderr to logcat + log.txt, unpack the
++ * APK payload, and rewrite argv so argv[0] anchors inside the data directory. */
++void psx_android_bootstrap(int* argc, char*** argv);
++
++/* SDL_main body: psx_android_bootstrap(), then fn(argc, argv) on a thread with
++ * a desktop-sized (64 MB) stack. Returns fn's result. */
++int psx_android_main(int (*fn)(int, char**), int argc, char** argv);
++
++/* Called right after SDL_Init: logs connected controllers and installs an
++ * event watch that logs controller hotplug. */
++void psx_android_after_sdl_init(void);
++
++/* The directory chosen by psx_android_bootstrap(). */
++const char* psx_android_data_dir(void);
++#endif
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSX_ANDROID_H */
+diff --git a/runtime/include/psx_dynamic_game.h b/runtime/include/psx_dynamic_game.h
+new file mode 100644
+index 0000000..741868c
+--- /dev/null
++++ b/runtime/include/psx_dynamic_game.h
+@@ -0,0 +1,35 @@
++/*
++ * psx_dynamic_game.h — load the recompiled game at startup (see
++ * psx_dynamic_game.c).
++ */
++#ifndef PSX_DYNAMIC_GAME_H
++#define PSX_DYNAMIC_GAME_H
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Compile the recompiler's output in gen_dir (<exe>_full_*.c and
++ * <exe>_dispatch.c, as psxrecomp-game writes them) into memory and bind the
++ * runtime's game-dispatch entry points to it.
++ *
++ * tcc_dir holds the headers the translation is compiled against:
++ *   tcc_dir/include  TinyCC's own headers (stddef.h, stdarg.h, ...)
++ *   tcc_dir/psx      the runtime headers the generated C includes
++ *   tcc_dir/libc     minimal libc headers, for hosts without system headers
++ *
++ * Returns 0 on success. On failure returns -1 with a message in err, and the
++ * runtime keeps running everything through the interpreter. */
++int psx_dynamic_game_load(const char *gen_dir, const char *tcc_dir,
++                          char *err, size_t err_len);
++
++/* 1 once psx_dynamic_game_load() has succeeded. */
++int psx_dynamic_game_loaded(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSX_DYNAMIC_GAME_H */
+diff --git a/runtime/include/psx_translate.h b/runtime/include/psx_translate.h
+new file mode 100644
+index 0000000..4eab9d6
+--- /dev/null
++++ b/runtime/include/psx_translate.h
+@@ -0,0 +1,30 @@
++/*
++ * psx_translate.h — translate the player's disc into C in-process (see
++ * psx_translate.cpp). PSX_DYNAMIC_GAME builds only.
++ */
++#ifndef PSX_TRANSLATE_H
++#define PSX_TRANSLATE_H
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Extract the boot executable from disc_path (.cue/.bin/.chd), check its
++ * SHA-256 against expect_exe_sha256 (skipped when NULL/empty), and run the
++ * recompiler with data_dir/game.toml, writing data_dir/generated/.
++ * Returns 0 on success, -2 for a disc with the wrong program, -1 otherwise;
++ * err receives a message suitable for the player. */
++int psx_translate_disc(const char *data_dir, const char *disc_path,
++                       const char *expect_exe_sha256, char *err, size_t err_len);
++
++/* 1 if data_dir/generated holds a translation of that executable made by
++ * this build's recompiler. */
++int psx_translate_is_current(const char *data_dir, const char *expect_exe_sha256);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSX_TRANSLATE_H */
+diff --git a/runtime/runtime.cmake b/runtime/runtime.cmake
+index 369989c..486584a 100644
+--- a/runtime/runtime.cmake
++++ b/runtime/runtime.cmake
+@@ -153,8 +153,16 @@ if(_psx_sdl_backend STREQUAL "SDL3")
+         # The fetched dependency is private to this build, so link it directly
+         # instead of producing an SDL3 DLL that would need platform-specific
+         # staging beside every generated game executable.
+-        set(SDL_SHARED OFF CACHE BOOL "Build SDL3 shared library" FORCE)
+-        set(SDL_STATIC ON CACHE BOOL "Build SDL3 static library" FORCE)
++        # Android is the exception: SDL's Java layer (SDLActivity) loads
++        # libSDL3.so and then the game's libmain.so, and resolves its JNI
++        # entry points in the former, so SDL must be a shared library there.
++        if(ANDROID)
++            set(SDL_SHARED ON CACHE BOOL "Build SDL3 shared library" FORCE)
++            set(SDL_STATIC OFF CACHE BOOL "Build SDL3 static library" FORCE)
++        else()
++            set(SDL_SHARED OFF CACHE BOOL "Build SDL3 shared library" FORCE)
++            set(SDL_STATIC ON CACHE BOOL "Build SDL3 static library" FORCE)
++        endif()
+         set(SDL_TEST_LIBRARY OFF CACHE BOOL "Build SDL3 test library" FORCE)
+         set(SDL_TESTS OFF CACHE BOOL "Build SDL3 tests" FORCE)
+         set(SDL_EXAMPLES OFF CACHE BOOL "Build SDL3 examples" FORCE)
+@@ -238,6 +246,137 @@ endif()
+ # root recomp-ui submodule (CMAKE_SOURCE_DIR/recomp-ui). Not vendored in
+ # psxrecomp — games that need the launcher own the pin.
+ option(PSX_RECOMP_UI "Build the shared recomp-ui Dear ImGui launcher" ON)
++
++# PSX_DYNAMIC_GAME: ship no game code. The runtime is built against the
++# game-dispatch interface but without the generated C; at startup it compiles
++# the translation psxrecomp-game wrote for the player's own disc, in memory,
++# with libtcc (runtime/src/psx_dynamic_game.c). The Android port uses this so
++# its APK contains nothing from the game.
++option(PSX_DYNAMIC_GAME
++    "Compile the translated game at startup with libtcc instead of linking it" OFF)
++
++# In-game overlay (settings menu + on-screen touch controls, Dear ImGui over
++# the software-renderer present path). Points at a directory holding
++# psx_ui.cpp, psx_ui_menu.cpp and imgui/; empty builds without it.
++set(PSX_UI_OVERLAY_DIR "" CACHE PATH "In-game overlay sources (empty = none)")
++set(PSX_TINYCC_ROOT "${PSXRECOMP_ROOT}/../tinycc" CACHE PATH
++    "TinyCC source tree used by PSX_DYNAMIC_GAME builds")
++
++function(psxrecomp_add_libtcc)
++    if(TARGET psx_libtcc)
++        return()
++    endif()
++    if(NOT EXISTS "${PSX_TINYCC_ROOT}/libtcc.c")
++        message(FATAL_ERROR
++            "PSX_DYNAMIC_GAME needs the TinyCC sources: ${PSX_TINYCC_ROOT}/libtcc.c "
++            "not found. Set -DPSX_TINYCC_ROOT=<tinycc checkout>.")
++    endif()
++    if(NOT EXISTS "${PSX_TINYCC_ROOT}/tccdefs_.h")
++        message(FATAL_ERROR
++            "${PSX_TINYCC_ROOT}/tccdefs_.h is missing. It is generated by TinyCC's "
++            "own build: run ./configure && make tccdefs_.h in the TinyCC tree.")
++    endif()
++    add_library(psx_libtcc STATIC "${PSX_TINYCC_ROOT}/libtcc.c")
++    target_include_directories(psx_libtcc
++        PUBLIC "${PSX_TINYCC_ROOT}"
++        PRIVATE "${PSXRECOMP_ROOT}/runtime/third_party/tinycc_config")
++    target_compile_definitions(psx_libtcc PRIVATE ONE_SOURCE=1)
++    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
++        target_compile_definitions(psx_libtcc PRIVATE TCC_TARGET_ARM64=1)
++    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
++        target_compile_definitions(psx_libtcc PRIVATE TCC_TARGET_X86_64=1)
++    else()
++        message(FATAL_ERROR
++            "PSX_DYNAMIC_GAME: no TinyCC target for ${CMAKE_SYSTEM_PROCESSOR}")
++    endif()
++    if(ANDROID)
++        target_compile_definitions(psx_libtcc PRIVATE TARGETOS_ANDROID=1)
++    endif()
++    if(NOT MSVC)
++        target_compile_options(psx_libtcc PRIVATE -w)
++    endif()
++    find_package(Threads REQUIRED)
++    target_link_libraries(psx_libtcc PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
++endfunction()
++
++# The recompiler (psxrecomp-game) linked into a PSX_DYNAMIC_GAME runtime so it
++# can translate the player's disc in-process (runtime/src/psx_translate.cpp).
++# config_loader.cpp and ps1_exe_parser.cpp are already runtime sources.
++function(psxrecomp_add_recompiler_lib)
++    if(TARGET psx_recompiler_lib)
++        return()
++    endif()
++    set(_rc "${PSXRECOMP_ROOT}/recompiler")
++    add_library(psx_rabbitizer STATIC
++        "${_rc}/lib/rabbitizer/cplusplus/src/analysis/LoPairingInfo.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/analysis/RegistersTracker.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstrId.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstrIdType.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstructionBase.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstructionCpu.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstructionR3000GTE.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstructionR5900.cpp"
++        "${_rc}/lib/rabbitizer/cplusplus/src/instructions/InstructionRsp.cpp"
++        "${_rc}/lib/rabbitizer/src/analysis/RabbitizerLoPairingInfo.c"
++        "${_rc}/lib/rabbitizer/src/analysis/RabbitizerRegistersTracker.c"
++        "${_rc}/lib/rabbitizer/src/analysis/RabbitizerTrackedRegisterState.c"
++        "${_rc}/lib/rabbitizer/src/common/RabbitizerConfig.c"
++        "${_rc}/lib/rabbitizer/src/common/RabbitizerVersion.c"
++        "${_rc}/lib/rabbitizer/src/common/Utils.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstrCategory.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstrDescriptor.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstrId.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstrIdType.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstrSuffix.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionCpu/RabbitizerInstructionCpu_OperandType.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionR3000GTE/RabbitizerInstructionR3000GTE.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionR3000GTE/RabbitizerInstructionR3000GTE_OperandType.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionR3000GTE/RabbitizerInstructionR3000GTE_ProcessUniqueId.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionR5900/RabbitizerInstructionR5900.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionR5900/RabbitizerInstructionR5900_OperandType.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionR5900/RabbitizerInstructionR5900_ProcessUniqueId.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionRsp/RabbitizerInstructionRsp.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionRsp/RabbitizerInstructionRsp_OperandType.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstructionRsp/RabbitizerInstructionRsp_ProcessUniqueId.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstruction/RabbitizerInstruction.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstruction/RabbitizerInstruction_Disassemble.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstruction/RabbitizerInstruction_Examination.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstruction/RabbitizerInstruction_Operand.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerInstruction/RabbitizerInstruction_ProcessUniqueId.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerRegister.c"
++        "${_rc}/lib/rabbitizer/src/instructions/RabbitizerRegisterDescriptor.c"
++    )
++    target_include_directories(psx_rabbitizer PRIVATE
++        "${_rc}/lib/rabbitizer/include"
++        "${_rc}/lib/rabbitizer/cplusplus/include"
++        "${_rc}/lib/rabbitizer/tables")
++    target_compile_features(psx_rabbitizer PRIVATE cxx_std_20)
++    add_library(psx_recompiler_lib STATIC
++        "${_rc}/src/mips_decoder.cpp"
++        "${_rc}/src/control_flow.cpp"
++        "${_rc}/src/function_analysis.cpp"
++        "${_rc}/src/code_generator.cpp"
++        "${_rc}/src/pgxp_hook_emitter.cpp"
++        "${_rc}/src/bios_address_model.cpp"
++        "${_rc}/src/annotations.cpp"
++        "${_rc}/src/recompiler_patch.cpp"
++        "${_rc}/src/main_psx.cpp")
++    # psxrecomp-game's entry point, callable in-process.
++    set_source_files_properties("${_rc}/src/main_psx.cpp" PROPERTIES
++        COMPILE_DEFINITIONS "main=psxrecomp_game_main")
++    target_include_directories(psx_recompiler_lib PRIVATE
++        "${_rc}/include"
++        "${_rc}/src"
++        "${_rc}/lib/rabbitizer/include"
++        "${_rc}/lib/rabbitizer/cplusplus/include"
++        "${_rc}/lib/fmt/include"
++        "${_rc}/lib/toml11"
++        "${_rc}/lib/ELFIO"
++        "${PSXRECOMP_ROOT}/runtime/include")
++    target_compile_definitions(psx_recompiler_lib PRIVATE FMT_HEADER_ONLY=1 FMT_CONSTEVAL=)
++    target_compile_features(psx_recompiler_lib PRIVATE cxx_std_20)
++    target_link_libraries(psx_recompiler_lib PUBLIC psx_rabbitizer)
++endfunction()
+ option(PSX_SHELLWIN_INTERP "Default the shell-window dirty-RAM interpreter to ON ( BIOS without shell seeds )" OFF)
+ set(RECOMP_UI_ROOT "" CACHE PATH
+     "Path to recomp-ui; empty = <game>/recomp-ui")
+@@ -347,6 +486,13 @@ set(PSXRECOMP_RUNTIME_SOURCES
+     # default since 2026-06-25; gaps fall to the interpreter, gcc/tcc unaffected.)
+ )
+ 
++# Android: app-private data directory, APK asset unpacking and logcat logging
++# (psx_android.cpp, called from the top of main()).
++if(ANDROID)
++    list(APPEND PSXRECOMP_RUNTIME_SOURCES
++        ${PSXRECOMP_ROOT}/runtime/src/psx_android.cpp)
++endif()
++
+ # Optional delay-sync netplay (recomp-net). Auto-discovers a sibling checkout
+ # (…/recomp-net next to the game repo or next to psxrecomp). Override with
+ # -DRECOMP_NET_ROOT=… or -DPSX_NETPLAY=OFF.
+@@ -779,7 +925,7 @@ function(psxrecomp_add_runtime_target target)
+     # and stamp the pgxp overlay flavor so the shard cache and the ABI gate
+     # keep pgxp and base DLLs fully separate. The base target is untouched —
+     # the macros preprocess away without the define.
+-    set(options ORACLE COSIM PGXP)
++    set(options ORACLE COSIM PGXP DYNAMIC_GAME)
+     set(oneValueArgs
+         GAME_GENERATED_DISPATCH_C
+         GAME_OVERLAY_STATIC_C
+@@ -905,18 +1051,42 @@ function(psxrecomp_add_runtime_target target)
+         set(has_overlay_dispatch TRUE)
+     endif()
+ 
++    if(PSXRT_DYNAMIC_GAME)
++        # The translation is compiled and bound at startup, so build the whole
++        # runtime exactly as if a modern dispatcher were linked.
++        set(has_game_dispatch TRUE)
++        set(has_game_dispatch_native_ok TRUE)
++        set(has_game_dispatch_native_ok_full TRUE)
++        list(APPEND PSXRT_EXTRAS_SOURCES
++            ${PSXRECOMP_ROOT}/runtime/src/psx_dynamic_game.c
++            ${PSXRECOMP_ROOT}/runtime/src/psx_translate.cpp)
++        psxrecomp_add_libtcc()
++        psxrecomp_add_recompiler_lib()
++    endif()
++
+     if(PSXRT_ORACLE)
+         set(mode_source ${PSXRECOMP_ROOT}/runtime/src/psx_interpreter.c)
+     else()
+         set(mode_source ${PSXRECOMP_ROOT}/runtime/src/stub_interpreter.c)
+     endif()
+ 
+-    add_executable(${target}
+-        ${PSXRECOMP_RUNTIME_SOURCES}
+-        ${mode_source}
+-        ${generated_sources}
+-        ${PSXRT_EXTRAS_SOURCES}
+-    )
++    if(ANDROID)
++        # Android has no executables: SDL's Java activity loads the game as
++        # libmain.so and calls its SDL_main (see the OUTPUT_NAME override below).
++        add_library(${target} SHARED
++            ${PSXRECOMP_RUNTIME_SOURCES}
++            ${mode_source}
++            ${generated_sources}
++            ${PSXRT_EXTRAS_SOURCES}
++        )
++    else()
++        add_executable(${target}
++            ${PSXRECOMP_RUNTIME_SOURCES}
++            ${mode_source}
++            ${generated_sources}
++            ${PSXRT_EXTRAS_SOURCES}
++        )
++    endif()
+     target_link_libraries(${target} PRIVATE chdr-static)
+     # audio_trace.c uses C11 atomics. Make the runtime's actual language
+     # requirement explicit instead of relying on a parent project's global
+@@ -952,6 +1122,10 @@ function(psxrecomp_add_runtime_target target)
+             PSX_OVERLAY_FLAVOR=2)   # PSX_OVERLAY_FLAVOR_PGXP (overlay_api.h)
+     endif()
+     set_target_properties(${target} PROPERTIES OUTPUT_NAME "${_psxrt_exe_name}")
++    if(ANDROID)
++        # SDLActivity loads "libmain.so" by default.
++        set_target_properties(${target} PROPERTIES OUTPUT_NAME "main")
++    endif()
+     # Strip Release binaries: the multi-MB COFF symbol table + DWARF sections
+     # are pure scanner bait and account for ~30% of the setup host's size.
+     if(WIN32 AND (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"))
+@@ -1362,6 +1536,60 @@ function(psxrecomp_add_runtime_target target)
+     if(has_game_dispatch)
+         target_compile_definitions(${target} PRIVATE PSX_HAS_GAME_DISPATCH=1)
+     endif()
++    if(PSX_UI_OVERLAY_DIR)
++        set(_psxrt_ui "${PSX_UI_OVERLAY_DIR}")
++        target_sources(${target} PRIVATE
++            "${_psxrt_ui}/psx_ui.cpp"
++            "${_psxrt_ui}/psx_ui_menu.cpp"
++            "${_psxrt_ui}/imgui/imgui.cpp"
++            "${_psxrt_ui}/imgui/imgui_draw.cpp"
++            "${_psxrt_ui}/imgui/imgui_tables.cpp"
++            "${_psxrt_ui}/imgui/imgui_widgets.cpp"
++            "${_psxrt_ui}/imgui/backends/imgui_impl_sdl3.cpp"
++            "${_psxrt_ui}/imgui/backends/imgui_impl_sdlrenderer3.cpp")
++        target_include_directories(${target} PRIVATE
++            "${_psxrt_ui}" "${_psxrt_ui}/imgui" "${_psxrt_ui}/imgui/backends")
++        target_compile_definitions(${target} PRIVATE PSX_HAS_UI_OVERLAY=1)
++    endif()
++    if(PSXRT_DYNAMIC_GAME)
++        # The flags the generated C must be compiled with at startup so it
++        # matches this build of the runtime (see the #if tests in the headers
++        # it includes: block cycles, debug tools, PGXP, cosim).
++        set(_psxrt_dyn_cflags "-DPSX_ENABLE_BLOCK_CYCLES=1 -DNDEBUG")
++        if(NOT PSX_DEBUG_TOOLS OR PSXRT_COSIM)
++            string(APPEND _psxrt_dyn_cflags " -DPSX_NO_DEBUG_TOOLS=1")
++        endif()
++        if(PSXRT_PGXP)
++            string(APPEND _psxrt_dyn_cflags " -DPSX_PGXP=1")
++        endif()
++        if(PSXRT_COSIM)
++            string(APPEND _psxrt_dyn_cflags " -DPSX_COSIM=1")
++        endif()
++        target_compile_definitions(${target} PRIVATE
++            PSX_DYNAMIC_GAME=1
++            "PSX_DYNAMIC_GAME_CFLAGS=\"${_psxrt_dyn_cflags}\"")
++        target_link_libraries(${target} PRIVATE psx_libtcc psx_recompiler_lib)
++        # The translation resolves the runtime functions it calls with dlsym,
++        # so an executable must export its symbols (a shared library, as on
++        # Android, already does).
++        set_target_properties(${target} PROPERTIES ENABLE_EXPORTS ON)
++        # Headers the translation is compiled against, staged next to the
++        # runtime (tcc/include, tcc/psx; Android adds tcc/libc).
++        find_package(Python3 REQUIRED COMPONENTS Interpreter)
++        set(_psxrt_tcc_libc "")
++        if(ANDROID)
++            set(_psxrt_tcc_libc --libc "${PSXRECOMP_ROOT}/runtime/third_party/tcc_libc")
++        endif()
++        add_custom_command(TARGET ${target} POST_BUILD
++            COMMAND "${Python3_EXECUTABLE}"
++                    "${PSXRECOMP_ROOT}/tools/stage_tcc_headers.py"
++                    --tinycc "${PSX_TINYCC_ROOT}"
++                    --runtime-include "${PSXRECOMP_ROOT}/runtime/include"
++                    ${_psxrt_tcc_libc}
++                    --out "$<TARGET_FILE_DIR:${target}>/tcc"
++            COMMENT "Staging headers for the startup game compile"
++            VERBATIM)
++    endif()
+     if(has_game_dispatch_native_ok)
+         # Only the compatibility translation unit needs to know whether the
+         # generated dispatcher supplies the modern exact-range predicate.
+@@ -1500,6 +1728,11 @@ function(psxrecomp_add_runtime_target target)
+         if(MINGW)
+             target_link_libraries(${target} PRIVATE winpthread)
+         endif()
++    elseif(ANDROID)
++        # GL entry points the renderer calls directly resolve against GLES;
++        # the rest are loaded at runtime through SDL_GL_GetProcAddress.
++        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS}
++            GLESv3 EGL android log)
+     else()
+         if(CMAKE_DL_LIBS)
+             target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
+@@ -1619,6 +1852,13 @@ function(psxrecomp_add_runtime_target target)
+             $<$<COMPILE_LANGUAGE:CXX>:-fzero-initialized-in-bss>)
+     endif()
+ 
++    # Plain `char` is unsigned on Android/Linux AArch64 but signed on every
++    # platform this runtime and its generated C are tested on (x86, Apple
++    # arm64). Keep it signed so byte handling behaves identically.
++    if(ANDROID)
++        target_compile_options(${target} PRIVATE -fsigned-char)
++    endif()
++
+     if(MINGW)
+         target_link_options(${target} PRIVATE -Wl,--stack,67108864)
+         # No console window in Release MinGW builds.
+@@ -1847,11 +2087,12 @@ function(psxrecomp_add_game_runtime target)
+     endif()
+ 
+     set(_psxg_has_game_c FALSE)
+-    if(EXISTS "${_psxg_marker}" AND NOT PSXRECOMP_FORCE_SETUP_HOST)
++    if(EXISTS "${_psxg_marker}" AND NOT PSXRECOMP_FORCE_SETUP_HOST
++       AND NOT PSX_DYNAMIC_GAME)
+         set(_psxg_has_game_c TRUE)
+     endif()
+ 
+-    if(NOT _psxg_has_game_c)
++    if(NOT _psxg_has_game_c AND NOT PSX_DYNAMIC_GAME)
+         set(PSXRECOMP_ALLOW_NO_BIOS ON CACHE BOOL
+             "Allow runtime with no BIOS backends (setup host)" FORCE)
+     endif()
+@@ -1917,6 +2158,12 @@ function(psxrecomp_add_game_runtime target)
+         if(TARGET ${target}-pgxp)
+             list(APPEND _psxg_targets ${target}-pgxp)
+         endif()
++    elseif(PSX_DYNAMIC_GAME)
++        message(STATUS
++            "psxrecomp: dynamic game — no game C linked; the translation is "
++            "compiled at startup with libtcc")
++        psxrecomp_add_runtime_target(${target} DYNAMIC_GAME ${_psxg_rt_args})
++        set(_psxg_targets ${target})
+     else()
+         message(STATUS
+             "psxrecomp: setup host (no game C, no BIOS backends) — "
+diff --git a/runtime/src/crash_trace.c b/runtime/src/crash_trace.c
+index 0fe0d27..4db4074 100644
+--- a/runtime/src/crash_trace.c
++++ b/runtime/src/crash_trace.c
+@@ -859,6 +859,13 @@ void psx_fatal_halt(const char *reason) {
+ 
+ #include <signal.h>
+ 
++#if defined(__ANDROID__)
++/* Android's crash reporter (debuggerd) is itself a signal handler. Keep the
++ * ones we displace so a crash still produces a tombstone with a native
++ * backtrace once our own report is written. */
++static struct sigaction s_prev_segv, s_prev_abrt;
++#endif
++
+ static void psx_signal_handler(int sig) {
+     static char reason[64];
+     snprintf(reason, sizeof(reason), "signal_%d", sig);
+@@ -868,6 +875,13 @@ static void psx_signal_handler(int sig) {
+      * guards against overwriting an earlier fatal dump. */
+     if (!g_psx_fatal_reason) g_psx_fatal_reason = reason;
+     freeze_heartbeat_fatal_dump(reason);
++#if defined(__ANDROID__)
++    /* Hand the signal back to debuggerd: a fault re-executes and lands in the
++     * restored handler; an abort is raised again. */
++    sigaction(sig, sig == SIGSEGV ? &s_prev_segv : &s_prev_abrt, NULL);
++    if (sig != SIGSEGV) raise(sig);
++    return;
++#endif
+     /* Reraise default handler so debugger / OS can also act. */
+     signal(sig, SIG_DFL);
+     raise(sig);
+@@ -909,7 +923,16 @@ static void psx_atexit_handler(void) {
+ }
+ 
+ void psx_crash_trace_install_handlers(void) {
+-#ifndef _WIN32
++#if defined(__ANDROID__)
++    {
++        struct sigaction sa;
++        memset(&sa, 0, sizeof(sa));
++        sa.sa_handler = psx_signal_handler;
++        sigemptyset(&sa.sa_mask);
++        sigaction(SIGSEGV, &sa, &s_prev_segv);
++        sigaction(SIGABRT, &sa, &s_prev_abrt);
++    }
++#elif !defined(_WIN32)
+     signal(SIGSEGV, psx_signal_handler);
+ #endif
+     /* Soft-exit on all hosts (incl. MinGW): MSYS2 kill -TERM must flush PGO. */
+@@ -918,7 +941,9 @@ void psx_crash_trace_install_handlers(void) {
+ #ifdef SIGUSR1
+     signal(SIGUSR1, psx_soft_exit_handler);
+ #endif
++#if !defined(__ANDROID__)
+     signal(SIGABRT, psx_signal_handler);
++#endif
+ #ifdef _WIN32
+     /* Let access violations reach the SEH filter with their faulting CONTEXT.
+      * MinGW's SIGSEGV bridge discards EXCEPTION_POINTERS, reducing the report
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index e8e8328..b755ed7 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -97,6 +97,12 @@ extern "C" void psx_game_codegen_forward_if_built(int argc, char** argv);
+  * every SDL-using source emit WinMain under MinGW.
+  */
+ #include <SDL3/SDL_main.h>
++#include "psx_android.h"
++#include "psx_dynamic_game.h"
++#include "psx_translate.h"
++#if defined(PSX_HAS_UI_OVERLAY)
++#include "psx_ui.h"
++#endif
+ #endif
+ #include "psx_sdl_audio.h"
+ #if defined(PSX_WEB)
+@@ -2523,6 +2529,19 @@ static std::filesystem::path default_memcard_dir(const char* argv0) {
+ static void close_controller(void);
+ static void shutdown_runtime(void);
+ 
++/* Leave the process once shutdown_runtime() has flushed what matters. */
++[[noreturn]] static void exit_after_shutdown(int code) {
++#if defined(__ANDROID__)
++    /* exit() runs static destructors while SDL's Java-driven threads are
++     * still live, and bionic's FORTIFY aborts the process on their use of the
++     * destroyed mutexes, turning a normal close into a crash report. */
++    std::fflush(nullptr);
++    _exit(code);
++#else
++    std::exit(code);
++#endif
++}
++
+ /* Set when this process started netplay from the lobby room — soft-exit returns
+  * there instead of killing the process. */
+ static int g_netplay_from_lobby = 0;
+@@ -2654,7 +2673,7 @@ static void netplay_soft_exit(const char *origin) {
+         return;
+     }
+     shutdown_runtime();
+-    std::exit(0);
++    exit_after_shutdown(0);
+ }
+ 
+ static void shutdown_runtime(void) {
+@@ -4591,6 +4610,10 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
+         btn &= pad_from_keyboard(player);
+     if (src.all_pads)
+         btn &= dev_all_controllers_buttons(suppress_stick);
++#if defined(PSX_HAS_UI_OVERLAY)
++    if (s == 0)
++        btn &= psx_ui_pad_buttons();   /* on-screen touch controls */
++#endif
+ 
+     /* Analog axes. Pinned-ANALOG folds the physical D-pad onto the left axes
+      * (fold_dpad) so the D-pad still moves stick-only games; HYBRID feeds the
+@@ -5627,6 +5650,30 @@ static void savestate_menu_submit(int save) {
+     }
+ }
+ 
++#if defined(PSX_HAS_UI_OVERLAY)
++/* What the in-game overlay (psx_ui_host.h) may change in the runtime. */
++extern "C" int psx_host_savestate_submit(int slot, int save) {
++    return savestate_submit_slot(slot, save);
++}
++extern "C" int psx_host_video_smooth(void) { return g_video_aa ? 1 : 0; }
++extern "C" void psx_host_set_video_smooth(int on) { g_video_aa = on ? 1 : 0; }
++extern "C" int psx_host_texture_filter(void) { return g_video_texfilter; }
++extern "C" void psx_host_set_texture_filter(int on) {
++    g_video_texfilter = on ? 1 : 0;
++    gr_set_texture_filter(g_video_texfilter);
++}
++extern "C" int psx_host_screen_kind(void) { return g_video_screen; }
++extern "C" void psx_host_set_screen_kind(int kind) {
++    g_video_screen = kind;
++    gpu_set_screen_kind(kind);
++}
++extern "C" int psx_host_internal_scale(void) { return g_video_scale; }
++extern "C" uint64_t psx_host_frame_count(void) { return (uint64_t)s_frame_count; }
++extern "C" void psx_host_input_guard(void) { savestate_input_guard_arm(); }
++static void shutdown_runtime(void);
++extern "C" void psx_host_shutdown(void) { shutdown_runtime(); }
++#endif
++
+ static int savestate_menu_slot_from_key(SDL_Keycode key) {
+     if (key >= SDLK_1 && key <= SDLK_9)
+         return (int)(key - SDLK_1);
+@@ -5805,11 +5852,41 @@ static void rewind_pause_present(void) {
+             SDL_RenderCopy(sdl_renderer, sdl_texture, &s_sw_hold_src,
+                            &s_sw_hold_dst);
+         host_osd_draw_sdl(sdl_renderer);
++#if defined(PSX_HAS_UI_OVERLAY)
++        psx_ui_render(sdl_renderer);
++#endif
+         SDL_RenderPresent(sdl_renderer);
+     }
+ #endif
+ }
+ 
++#if defined(PSX_HAS_UI_OVERLAY)
++/* Freeze the guest in vblank present while the in-game menu is open. */
++static void ui_menu_host_pause_loop(void) {
++    while (psx_ui_menu_open()) {
++        SDL_Event ev;
++        while (SDL_PollEvent(&ev)) {
++            if (ev.type == SDL_QUIT) {
++                psx_crash_trace_set_exit_origin("sdl_window_close");
++                shutdown_runtime();
++                exit_after_shutdown(0);
++            } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
++                refresh_player_devices();
++            } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
++                close_controller();
++                refresh_player_devices();
++            }
++        }
++        const Uint64 t0 = SDL_GetTicks();
++        rewind_pause_present();
++        /* Without driver vsync the present returns at once; keep ~60 Hz. */
++        const Uint64 spent = SDL_GetTicks() - t0;
++        if (spent < 15) SDL_Delay((Uint32)(15 - spent));
++    }
++    savestate_input_guard_arm();
++}
++#endif
++
+ /* Freeze guest in vblank present while the rewind filmstrip is open. */
+ static void rewind_host_pause_loop(void) {
+     while (psx_rewind_is_open()) {
+@@ -5818,7 +5895,7 @@ static void rewind_host_pause_loop(void) {
+             if (ev.type == SDL_QUIT) {
+                 psx_crash_trace_set_exit_origin("sdl_window_close");
+                 shutdown_runtime();
+-                std::exit(0);
++                exit_after_shutdown(0);
+             } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                 refresh_player_devices();
+             } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+@@ -5856,7 +5933,7 @@ static void savestate_menu_host_pause_loop(void) {
+             if (ev.type == SDL_QUIT) {
+                 psx_crash_trace_set_exit_origin("sdl_window_close");
+                 shutdown_runtime();
+-                std::exit(0);
++                exit_after_shutdown(0);
+             } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                 refresh_player_devices();
+             } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+@@ -6061,7 +6138,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+                 }
+                 psx_crash_trace_set_exit_origin("sdl_window_close");
+                 shutdown_runtime();
+-                std::exit(0);
++                exit_after_shutdown(0);
+             } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                 refresh_player_devices();
+             } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+@@ -6155,6 +6232,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+             savestate_menu_host_pause_loop();
+         if (psx_rewind_is_open())
+             rewind_host_pause_loop();
++#if defined(PSX_HAS_UI_OVERLAY)
++        if (psx_ui_menu_open())
++            ui_menu_host_pause_loop();
++#endif
+     }
+ 
+     /* Sample each player's device and feed the matching SIO pad slot.
+@@ -6313,8 +6394,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+      * Rollback resim: skip host audio pump (uncapped frames) so SPU/CD audio
+      * paths cannot fork peers during the episode window. */
+     if (!psx_netplay_is_resimulating() && !psx_selfcheck_resim_active()) {
++        bool ui_speed_sink = false;
++#if defined(PSX_HAS_UI_OVERLAY)
++        {
++            const float sp = psx_ui_game_speed();
++            ui_speed_sink = sp < 0.99f || sp > 1.01f;
++        }
++#endif
+         sdl_audio_update(fmv_skip_active,
+-                         turbo_loads_active && g_turbo_audio_sink_enabled);
++                         (turbo_loads_active && g_turbo_audio_sink_enabled) ||
++                         ui_speed_sink);
+     }
+ #endif
+ 
+@@ -6375,6 +6464,32 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+         }
+     }
+ 
++#if defined(PSX_HAS_UI_OVERLAY)
++    /* Game speed / fast-forward from the in-game menu: pace each guest frame
++     * at the scaled period ourselves, and above 1x present only every Nth
++     * frame so a vsync'd present cannot cap the speed. */
++    if (!manual_turbo_active && g_frame_period_ms > 0.0) {
++        const float speed = psx_ui_game_speed();
++        if (speed < 0.99f || speed > 1.01f) {
++            static int ui_speed_skip = 0;
++            manual_turbo_active = true;
++            {
++                uint64_t perf_start = runtime_perf_section_begin();
++                frame_pacer_wait(&s_frame_pacer, g_frame_period_ms / (double)speed);
++                runtime_perf_section_end(perf_start, &g_runtime_perf.pacer_ticks);
++                latency_ring_mark(LAT_PACED);
++            }
++            const int present_every = speed > 1.0f ? (int)std::ceil(speed) : 1;
++            ui_speed_skip = (ui_speed_skip + 1) % present_every;
++            if (ui_speed_skip != 0) {
++                ep.skip_pace = 1;
++                return ep;
++            }
++            ep.skip_pace = 1;
++        }
++    }
++#endif
++
+     /* Turbo-through-loads (step 4, OPT-IN via game.toml [runtime]
+      * turbo_loads): while the game is loading — CD data stream active,
+      * XA/FMV excluded, post-BIOS-handoff only — skip wall-clock pacing and
+@@ -6954,6 +7069,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+     SDL_RenderClear(sdl_renderer);
+     SDL_RenderCopy(sdl_renderer, sdl_texture, &src, &dst);
+     host_osd_draw_sdl(sdl_renderer);
++#if defined(PSX_HAS_UI_OVERLAY)
++    psx_ui_render(sdl_renderer);
++#endif
+     /* §33: remember active rect for resim hold-last (not full 640x512). */
+     s_sw_hold_src = src;
+     s_sw_hold_dst = dst;
+@@ -10370,7 +10488,19 @@ namespace {
+ }  // namespace
+ #endif
+ 
++#if defined(__ANDROID__)
++/* SDL runs SDL_main on a Java thread with a ~1 MB stack. The runtime is built
++ * for the 64 MB stack it links with on Windows (runtime.cmake) and overflows
++ * that, so psx_android_main() sets up the app (data directory, payload,
++ * logging) and then runs the real entry point on a thread of its own. */
++static int psx_runtime_main(int argc, char** argv);
++int main(int argc, char** argv) {
++    return psx_android_main(psx_runtime_main, argc, argv);
++}
++static int psx_runtime_main(int argc, char** argv) {
++#else
+ int main(int argc, char** argv) {
++#endif
+     /* Force line-buffered output so messages appear even if killed. */
+     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+     std::setvbuf(stderr, nullptr, _IOLBF, 0);
+@@ -10391,6 +10521,22 @@ int main(int argc, char** argv) {
+     /* Install crash handlers early so they catch issues during init too.
+      * Writes psx_last_run_report.json on signal/SEH/atexit/fail-fast. */
+     psx_crash_trace_install_handlers();
++
++#if defined(PSX_DYNAMIC_GAME)
++    /* --translate <disc> <data-dir>: run the in-process recompiler on a disc
++     * image (writes <data-dir>/generated) and exit. The Android app does the
++     * same from its setup screen. */
++    for (int i = 1; i + 2 < argc; i++) {
++        if (std::strcmp(argv[i], "--translate") == 0) {
++            char err[1024];
++            const int rc = psx_translate_disc(argv[i + 2], argv[i + 1], nullptr,
++                                              err, sizeof(err));
++            std::fprintf(rc ? stderr : stdout, "psxrecomp: %s\n",
++                         rc ? err : "translation complete");
++            return rc ? 1 : 0;
++        }
++    }
++#endif
+ #if defined(RECOMP_LAUNCHER)
+     launcher_boot_timing_mark("host:crash_handlers");
+ #endif
+@@ -11019,6 +11165,32 @@ int main(int argc, char** argv) {
+ #if defined(RECOMP_LAUNCHER)
+     launcher_boot_timing_mark("host:game_config_done");
+ #endif
++#if defined(PSX_DYNAMIC_GAME)
++    /* No game code is linked into this build: compile the translation of the
++     * player's disc (generated/, written by psxrecomp-game) and bind it before
++     * anything can call into game code. */
++    {
++        const std::filesystem::path gen_dir =
++            resolve_existing_runtime_path("generated", argv[0]);
++        const std::filesystem::path tcc_dir =
++            resolve_existing_runtime_path("tcc", argv[0]);
++        const uint64_t t0 = SDL_GetTicks();
++        static char dyn_err[4096];
++        if (gen_dir.empty() || tcc_dir.empty() ||
++            psx_dynamic_game_load(gen_dir.string().c_str(),
++                                  tcc_dir.string().c_str(),
++                                  dyn_err, sizeof(dyn_err)) != 0) {
++            std::fprintf(stderr,
++                         "psxrecomp: cannot load the translated game (%s%s): %s\n",
++                         gen_dir.empty() ? "no generated/ directory" : "",
++                         tcc_dir.empty() ? " no tcc/ headers" : "",
++                         dyn_err[0] ? dyn_err : "see above");
++            return 1;
++        }
++        std::fprintf(stdout, "psxrecomp: game compiled in %llu ms\n",
++                     (unsigned long long)(SDL_GetTicks() - t0));
++    }
++#endif
+ 
+     if (!game_name.empty()) s_picker_game_name = game_name;
+ 
+@@ -12773,6 +12945,9 @@ session_reboot:
+             return 1;
+         }
+     }
++#if defined(__ANDROID__)
++    psx_android_after_sdl_init();
++#endif
+     load_input_config(argv[0]);
+     /* The launcher / settings.toml / game.toml deadzone (when set) is the
+      * user-facing authority; apply it over the input.ini value here, after
+@@ -12832,6 +13007,11 @@ session_reboot:
+      * borderless desktop fullscreen (keeps the desktop resolution, letterboxes
+      * the image), 2 = exclusive fullscreen (real display-mode change), 0 =
+      * windowed. Matches the in-game Alt+Enter / Cmd+Ctrl+F hotkey behaviour. */
++#if defined(__ANDROID__)
++    /* A phone app is always fullscreen; SDL's activity hides the system bars
++     * only for a fullscreen window. */
++    g_fullscreen = 1;
++#endif
+     win_flags |= psx_fullscreen_flag_for_mode(g_fullscreen);
+     /* Open at the user-chosen window size (default 1280 wide) instead of the
+      * old hardcoded 640x480, so the game doesn't boot into a tiny window. The
+@@ -13037,6 +13217,10 @@ session_reboot:
+   }
+     log_present_cadence();
+   }
++#if defined(PSX_HAS_UI_OVERLAY)
++    if (sdl_renderer)
++        psx_ui_init(sdl_window, sdl_renderer, exe_dir_from_argv(argv[0]).string().c_str());
++#endif
+ 
+     /* Register vblank presentation callback. */
+     gpu_set_vblank_callback(sdl_vblank_present);
+diff --git a/runtime/src/memcard.c b/runtime/src/memcard.c
+index 215f17f..62786b3 100644
+--- a/runtime/src/memcard.c
++++ b/runtime/src/memcard.c
+@@ -245,6 +245,25 @@ void memcard_flush(int card) {
+     if (!cards[card].dirty) return;
+     if (cards[card].filepath[0] == '\0') return;
+ 
++#if defined(__ANDROID__)
++    /* Android kills apps without warning (swiped away, low memory), so never
++     * truncate the only copy: write a temp file and rename it over the card,
++     * which replaces it atomically. */
++    char tmp[sizeof(cards[card].filepath) + 8];
++    snprintf(tmp, sizeof(tmp), "%s.tmp", cards[card].filepath);
++    FILE* f = fopen(tmp, "wb");
++    if (f) {
++        size_t n = fwrite(cards[card].data, 1, MEMCARD_SIZE, f);
++        int flush_ok = (fflush(f) == 0);
++        int close_ok = (fclose(f) == 0);
++        if (n == MEMCARD_SIZE && flush_ok && close_ok &&
++            rename(tmp, cards[card].filepath) == 0) {
++            cards[card].dirty = 0;
++        } else {
++            remove(tmp);
++        }
++    }
++#else
+     FILE* f = fopen(cards[card].filepath, "wb");
+     if (f) {
+         size_t n = fwrite(cards[card].data, 1, MEMCARD_SIZE, f);
+@@ -254,6 +273,7 @@ void memcard_flush(int card) {
+             cards[card].dirty = 0;
+         }
+     }
++#endif
+ }
+ 
+ void memcard_flush_all(void) {
+diff --git a/runtime/src/psx_android.cpp b/runtime/src/psx_android.cpp
+new file mode 100644
+index 0000000..0803c56
+--- /dev/null
++++ b/runtime/src/psx_android.cpp
+@@ -0,0 +1,319 @@
++/*
++ * psx_android.cpp — Android host glue, run from the top of main().
++ *
++ * On desktop every runtime file (game.toml, disc, BIOS, mods, saves) is found
++ * next to the executable. An Android app has no executable directory, so this
++ * gives it one: the app's external files directory
++ * (/storage/emulated/0/Android/data/<package>/files, which needs no storage
++ * permission and is reachable over USB for save backups), falling back to
++ * internal storage. The app's setup screen (Java) installs the support files
++ * there and imports the player's disc; argv[0] is pointed into that directory
++ * so exe_dir_from_argv() anchors there.
++ *
++ * The same library also serves the setup screen: psx_translate_disc() turns
++ * the player's disc into C (see the JNI entry points at the bottom), which the
++ * runtime compiles at every launch (psx_dynamic_game.c).
++ *
++ * stdout/stderr (where the runtime logs everything) go to logcat under the
++ * tag "DigimonWorld" and to log.txt in the data directory.
++ */
++#include "psx_android.h"
++
++#if defined(__ANDROID__)
++
++#include <SDL3/SDL.h>
++#include <android/log.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <string>
++#include <vector>
++
++namespace {
++
++const char* const kLogTag = "DigimonWorld";
++
++std::string g_data_dir;
++std::vector<std::string> g_args;
++std::vector<char*> g_argv;
++int g_log_fd = -1;
++
++void alog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
++void alog(const char* fmt, ...) {
++    va_list ap;
++    va_start(ap, fmt);
++    __android_log_vprint(ANDROID_LOG_INFO, kLogTag, fmt, ap);
++    va_end(ap);
++}
++
++/* Pump the stdout/stderr pipe into logcat and log.txt, one line at a time. */
++void* log_pump(void* arg) {
++    const int fd = (int)(intptr_t)arg;
++    char buf[4096];
++    std::string line;
++    for (;;) {
++        const ssize_t n = read(fd, buf, sizeof(buf));
++        if (n <= 0) {
++            if (n < 0 && errno == EINTR) continue;
++            break;
++        }
++        if (g_log_fd >= 0) (void)!write(g_log_fd, buf, (size_t)n);
++        for (ssize_t i = 0; i < n; i++) {
++            if (buf[i] == '\n') {
++                __android_log_write(ANDROID_LOG_INFO, kLogTag, line.c_str());
++                line.clear();
++            } else {
++                line.push_back(buf[i]);
++            }
++        }
++    }
++    return nullptr;
++}
++
++void redirect_stdio_to_log() {
++    /* Once per process: the setup screen and the game share the process. */
++    static bool s_done = false;
++    if (s_done) return;
++    s_done = true;
++    const std::string log_path = g_data_dir + "/log.txt";
++    g_log_fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    int fds[2];
++    if (pipe(fds) != 0) return;
++    setvbuf(stdout, nullptr, _IOLBF, 0);
++    setvbuf(stderr, nullptr, _IOLBF, 0);
++    dup2(fds[1], STDOUT_FILENO);
++    dup2(fds[1], STDERR_FILENO);
++    close(fds[1]);
++    pthread_t t;
++    if (pthread_create(&t, nullptr, log_pump, (void*)(intptr_t)fds[0]) == 0)
++        pthread_detach(t);
++}
++
++bool is_dir(const std::string& p) {
++    struct stat st;
++    return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
++}
++
++bool make_dirs(const std::string& path) {
++    std::string cur;
++    size_t pos = 0;
++    while (pos != std::string::npos) {
++        pos = path.find('/', pos + 1);
++        cur = path.substr(0, pos);
++        if (cur.empty() || is_dir(cur)) continue;
++        if (mkdir(cur.c_str(), 0755) != 0 && errno != EEXIST) return false;
++    }
++    return true;
++}
++
++}  // namespace
++
++extern "C" void psx_android_bootstrap(int* argc, char*** argv) {
++    const char* base = nullptr;
++    if (SDL_GetAndroidExternalStorageState() & SDL_ANDROID_EXTERNAL_STORAGE_WRITE)
++        base = SDL_GetAndroidExternalStoragePath();
++    if (!base || !*base) base = SDL_GetAndroidInternalStoragePath();
++    g_data_dir = base ? base : ".";
++    make_dirs(g_data_dir);
++    redirect_stdio_to_log();
++    alog("data directory: %s", g_data_dir.c_str());
++    if (chdir(g_data_dir.c_str()) != 0)
++        alog("chdir(%s) failed: %s", g_data_dir.c_str(), strerror(errno));
++
++    /* Landscape only, and keep Android's Back from closing the game when a
++     * controller (or the gesture bar) sends it. */
++    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
++    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
++
++    /* Controllers. Phones expose keypads and remotes with D-pad keys that SDL
++     * would otherwise list as game controllers, and player 1 could claim one
++     * of those before the real pad connects over Bluetooth. Ignore devices
++     * with no sticks or hat, and let player 1 read every connected controller
++     * (the runtime's PSX_DEV_INPUT merge), so whichever pad is connected, and
++     * whenever, simply works. This is a single-player game, so there is no
++     * second player to steal input from. */
++    SDL_SetHint(SDL_HINT_TV_REMOTE_AS_JOYSTICK, "0");
++    setenv("PSX_DEV_INPUT", "1", 0);
++
++    /* The debug-build starvation watchdog aborts after a few seconds without
++     * a frame. A phone app legitimately stops for much longer (backgrounded,
++     * save-state menu open), so it has no meaning here. */
++    setenv("PSX_STARVATION_TIMEOUT_US", "0", 0);
++
++    /* argv[0] is the anchor for every runtime path, so place it in the data
++     * directory. Boot straight into the game: the desktop launcher is not
++     * built for Android. Arguments from the activity follow. */
++    g_args.clear();
++    g_args.push_back(g_data_dir + "/Digimon_World_Recompiled");
++    g_args.push_back("--no-launcher");
++    for (int i = 1; i < *argc; i++) g_args.push_back((*argv)[i]);
++    g_argv.clear();
++    for (auto& a : g_args) g_argv.push_back(a.data());
++    g_argv.push_back(nullptr);
++    *argc = (int)g_args.size();
++    *argv = g_argv.data();
++}
++
++extern "C" const char* psx_android_data_dir(void) { return g_data_dir.c_str(); }
++
++namespace {
++/* Log controller arrivals/departures so a pad that is not picked up can be
++ * diagnosed from logcat (or log.txt) alone. */
++bool SDLCALL log_device_events(void*, SDL_Event* ev) {
++    switch (ev->type) {
++    case SDL_EVENT_JOYSTICK_ADDED: {
++        const SDL_JoystickID id = ev->jdevice.which;
++        const char* name = SDL_GetJoystickNameForID(id);
++        alog("input: joystick added: id=%d name=\"%s\" vid=%04x pid=%04x gamepad=%d",
++             (int)id, name ? name : "?", SDL_GetJoystickVendorForID(id),
++             SDL_GetJoystickProductForID(id), SDL_IsGamepad(id) ? 1 : 0);
++        break;
++    }
++    case SDL_EVENT_JOYSTICK_REMOVED:
++        alog("input: joystick removed: id=%d", (int)ev->jdevice.which);
++        break;
++    case SDL_EVENT_GAMEPAD_ADDED:
++        alog("input: gamepad added: id=%d", (int)ev->gdevice.which);
++        break;
++    default:
++        break;
++    }
++    return true;
++}
++}  // namespace
++
++extern "C" void psx_android_after_sdl_init(void) {
++    SDL_AddEventWatch(log_device_events, nullptr);
++    int count = 0;
++    SDL_JoystickID* ids = SDL_GetJoysticks(&count);
++    alog("input: %d joystick(s) at startup", count);
++    for (int i = 0; ids && i < count; i++) {
++        const char* name = SDL_GetJoystickNameForID(ids[i]);
++        alog("input:   id=%d name=\"%s\" gamepad=%d", (int)ids[i], name ? name : "?",
++             SDL_IsGamepad(ids[i]) ? 1 : 0);
++    }
++    SDL_free(ids);
++}
++
++namespace {
++struct MainCall {
++    int (*fn)(int, char**);
++    int argc;
++    char** argv;
++    int rc;
++};
++
++void* main_thread(void* arg) {
++    MainCall* call = (MainCall*)arg;
++    call->rc = call->fn(call->argc, call->argv);
++    return nullptr;
++}
++}  // namespace
++
++extern "C" int psx_android_main(int (*fn)(int, char**), int argc, char** argv) {
++    psx_android_bootstrap(&argc, &argv);
++    /* Same stack the Windows build links with (-Wl,--stack,67108864). Only
++     * the pages actually touched are ever committed. */
++    MainCall call = {fn, argc, argv, 1};
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setstacksize(&attr, 64u << 20);
++    pthread_t t;
++    const int err = pthread_create(&t, &attr, main_thread, &call);
++    pthread_attr_destroy(&attr);
++    if (err != 0) {
++        alog("pthread_create for the runtime thread failed (%d); running inline", err);
++        return fn(argc, argv);
++    }
++    pthread_join(t, nullptr);
++    return call.rc;
++}
++
++/* ---- app lifecycle requests from the in-game menu ------------------------- */
++
++#include <jni.h>
++
++namespace {
++/* Call a no-argument method on the running activity (DigimonActivity). */
++void call_activity(const char* method) {
++    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
++    jobject activity = (jobject)SDL_GetAndroidActivity();
++    if (!env || !activity) return;
++    jclass cls = env->GetObjectClass(activity);
++    jmethodID m = env->GetMethodID(cls, method, "()V");
++    if (m) env->CallVoidMethod(activity, m);
++    if (env->ExceptionCheck()) env->ExceptionClear();
++    env->DeleteLocalRef(cls);
++    env->DeleteLocalRef(activity);
++}
++
++[[noreturn]] void wait_for_exit() {
++    /* The activity ends the process; never return into the game loop. */
++    for (;;) SDL_Delay(1000);
++}
++}  // namespace
++
++/* Start over through the setup screen (after "Change disc" or a setting that
++ * applies at boot). Saves must already be flushed. */
++extern "C" void psx_android_restart_app(void) {
++    alog("restarting the app");
++    call_activity("restartApp");
++    wait_for_exit();
++}
++
++extern "C" void psx_android_quit_app(void) {
++    alog("quitting");
++    call_activity("quitApp");
++    wait_for_exit();
++}
++
++/* ---- setup screen (com.cogent.digimonworld.SetupActivity) ---------------- */
++#if defined(PSX_DYNAMIC_GAME)
++
++#include "psx_translate.h"
++
++namespace {
++std::string jstr(JNIEnv* env, jstring s) {
++    if (!s) return {};
++    const char* c = env->GetStringUTFChars(s, nullptr);
++    std::string out = c ? c : "";
++    if (c) env->ReleaseStringUTFChars(s, c);
++    return out;
++}
++}  // namespace
++
++/* Returns null on success, or a message for the player. */
++extern "C" JNIEXPORT jstring JNICALL
++Java_com_cogent_digimonworld_SetupActivity_nativeTranslate(
++        JNIEnv* env, jclass, jstring data_dir, jstring disc_path, jstring exe_sha256) {
++    g_data_dir = jstr(env, data_dir);
++    redirect_stdio_to_log();
++    const std::string disc = jstr(env, disc_path);
++    const std::string sha = jstr(env, exe_sha256);
++    alog("setup: translating %s", disc.c_str());
++    char err[1024] = {0};
++    const int rc = psx_translate_disc(g_data_dir.c_str(), disc.c_str(), sha.c_str(),
++                                      err, sizeof(err));
++    alog("setup: translation %s%s%s", rc == 0 ? "complete" : "failed: ",
++         rc == 0 ? "" : err, "");
++    return rc == 0 ? nullptr : env->NewStringUTF(err);
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_com_cogent_digimonworld_SetupActivity_nativeIsTranslated(
++        JNIEnv* env, jclass, jstring data_dir, jstring exe_sha256) {
++    const std::string dir = jstr(env, data_dir);
++    const std::string sha = jstr(env, exe_sha256);
++    return psx_translate_is_current(dir.c_str(), sha.c_str()) ? JNI_TRUE : JNI_FALSE;
++}
++
++#endif /* PSX_DYNAMIC_GAME */
++#endif /* __ANDROID__ */
+diff --git a/runtime/src/psx_dynamic_game.c b/runtime/src/psx_dynamic_game.c
+new file mode 100644
+index 0000000..b91368d
+--- /dev/null
++++ b/runtime/src/psx_dynamic_game.c
+@@ -0,0 +1,293 @@
++/*
++ * psx_dynamic_game.c — load the recompiled game at startup instead of linking
++ * it at build time.
++ *
++ * A PSX_DYNAMIC_GAME build carries no game code at all. The recompiler's output
++ * for the player's own disc (generated/*.c) is compiled into memory with
++ * libtcc when the runtime starts, and the five entry points the runtime calls
++ * into game code are bound to it. The build still defines
++ * PSX_HAS_GAME_DISPATCH, so every other part of the runtime behaves exactly as
++ * in a build that linked the same C statically.
++ *
++ * Until the load succeeds (and if it fails) every query answers "not
++ * compiled", which routes execution through the interpreter exactly like any
++ * code the recompiler did not cover.
++ */
++#include "psx_dynamic_game.h"
++
++#include <dirent.h>
++#include <stdarg.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++
++#include "libtcc.h"
++
++#ifndef PSX_DYNAMIC_GAME_CFLAGS
++#  define PSX_DYNAMIC_GAME_CFLAGS ""
++#endif
++
++typedef struct CPUState CPUState;
++
++static int (*s_address_in_text)(uint32_t addr);
++static int (*s_text_native_ok)(uint32_t addr);
++static int (*s_text_native_ok_full)(uint32_t addr);
++static int (*s_dispatch)(CPUState *cpu, uint32_t addr);
++static int (*s_is_entry)(uint32_t addr);
++static TCCState *s_tcc;   /* owns the compiled code for the process lifetime */
++
++int psx_game_address_in_text(uint32_t addr)
++{
++    return s_address_in_text ? s_address_in_text(addr) : 0;
++}
++
++int psx_game_text_native_ok(uint32_t addr)
++{
++    return s_text_native_ok ? s_text_native_ok(addr) : 0;
++}
++
++int psx_game_text_native_ok_full(uint32_t addr)
++{
++    return s_text_native_ok_full ? s_text_native_ok_full(addr) : 0;
++}
++
++int psx_dispatch_game_compiled(CPUState *cpu, uint32_t addr)
++{
++    return s_dispatch ? s_dispatch(cpu, addr) : 0;
++}
++
++int psx_game_is_function_entry(uint32_t addr)
++{
++    return s_is_entry ? s_is_entry(addr) : 0;
++}
++
++int psx_dynamic_game_loaded(void)
++{
++    return s_dispatch != NULL;
++}
++
++/* The generated dispatcher marks CPS mode from a static constructor that
++ * runs before main(); do the same here so nothing that reads the flag early
++ * sees a different mode than a statically linked build would. */
++__attribute__((constructor)) static void psx_dynamic_game_mark_cps(void)
++{
++    extern int g_psx_cps_mode;
++    g_psx_cps_mode = 1;
++}
++
++/* The generated dispatcher defines the same five names as the forwarders
++ * above; compile it with its copies renamed. */
++static const char *const k_entry_points[][2] = {
++    { "psx_game_address_in_text",     "psx_dyn_game_address_in_text" },
++    { "psx_game_text_native_ok",      "psx_dyn_game_text_native_ok" },
++    { "psx_game_text_native_ok_full", "psx_dyn_game_text_native_ok_full" },
++    { "psx_dispatch_game_compiled",   "psx_dyn_dispatch_game_compiled" },
++    { "psx_game_is_function_entry",   "psx_dyn_game_is_function_entry" },
++};
++
++/* TinyCC lowers the bit-scan builtins to calls into its own helper library
++ * (libtcc1), which a -nostdlib memory compile does not link. Supply them from
++ * the host compiler instead, which implements them natively. */
++static int h_ffs(int x) { return __builtin_ffs(x); }
++static int h_ffsl(long x) { return __builtin_ffsl(x); }
++static int h_ffsll(long long x) { return __builtin_ffsll(x); }
++static int h_clz(unsigned x) { return __builtin_clz(x); }
++static int h_clzl(unsigned long x) { return __builtin_clzl(x); }
++static int h_clzll(unsigned long long x) { return __builtin_clzll(x); }
++static int h_ctz(unsigned x) { return __builtin_ctz(x); }
++static int h_ctzl(unsigned long x) { return __builtin_ctzl(x); }
++static int h_ctzll(unsigned long long x) { return __builtin_ctzll(x); }
++static int h_clrsb(int x) { return __builtin_clrsb(x); }
++static int h_clrsbl(long x) { return __builtin_clrsbl(x); }
++static int h_clrsbll(long long x) { return __builtin_clrsbll(x); }
++static int h_popcount(unsigned x) { return __builtin_popcount(x); }
++static int h_popcountl(unsigned long x) { return __builtin_popcountl(x); }
++static int h_popcountll(unsigned long long x) { return __builtin_popcountll(x); }
++static int h_parity(unsigned x) { return __builtin_parity(x); }
++static int h_parityl(unsigned long x) { return __builtin_parityl(x); }
++static int h_parityll(unsigned long long x) { return __builtin_parityll(x); }
++
++static const struct { const char *name; const void *fn; } k_tcc_builtins[] = {
++    { "__builtin_ffs", (const void *)h_ffs },
++    { "__builtin_ffsl", (const void *)h_ffsl },
++    { "__builtin_ffsll", (const void *)h_ffsll },
++    { "__builtin_clz", (const void *)h_clz },
++    { "__builtin_clzl", (const void *)h_clzl },
++    { "__builtin_clzll", (const void *)h_clzll },
++    { "__builtin_ctz", (const void *)h_ctz },
++    { "__builtin_ctzl", (const void *)h_ctzl },
++    { "__builtin_ctzll", (const void *)h_ctzll },
++    { "__builtin_clrsb", (const void *)h_clrsb },
++    { "__builtin_clrsbl", (const void *)h_clrsbl },
++    { "__builtin_clrsbll", (const void *)h_clrsbll },
++    { "__builtin_popcount", (const void *)h_popcount },
++    { "__builtin_popcountl", (const void *)h_popcountl },
++    { "__builtin_popcountll", (const void *)h_popcountll },
++    { "__builtin_parity", (const void *)h_parity },
++    { "__builtin_parityl", (const void *)h_parityl },
++    { "__builtin_parityll", (const void *)h_parityll },
++};
++
++typedef struct {
++    char  *buf;
++    size_t len;
++} ErrBuf;
++
++static void err_printf(ErrBuf *e, const char *fmt, ...)
++{
++    if (!e->buf || e->len == 0) return;
++    size_t used = strlen(e->buf);
++    if (used + 1 >= e->len) return;
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(e->buf + used, e->len - used, fmt, ap);
++    va_end(ap);
++}
++
++static void collect_tcc_error(void *opaque, const char *msg)
++{
++    ErrBuf *e = (ErrBuf *)opaque;
++    /* Keep the first few messages; one compile error tends to cascade. */
++    if (e->buf && strlen(e->buf) < e->len / 2)
++        err_printf(e, "%s\n", msg);
++}
++
++static int is_dir(const char *path)
++{
++    struct stat st;
++    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
++}
++
++static int cmp_names(const void *a, const void *b)
++{
++    return strcmp(*(const char *const *)a, *(const char *const *)b);
++}
++
++/* The translation units psxrecomp-game writes: *_full_NN.c shards (or a
++ * single *_full.c) plus *_dispatch.c. Sorted so the load is deterministic. */
++static int list_game_sources(const char *gen_dir, char ***out)
++{
++    DIR *d = opendir(gen_dir);
++    if (!d) return -1;
++    int cap = 64, n = 0;
++    char **names = (char **)malloc(sizeof(char *) * (size_t)cap);
++    struct dirent *de;
++    while (names && (de = readdir(d)) != NULL) {
++        const char *nm = de->d_name;
++        size_t l = strlen(nm);
++        if (l < 3 || strcmp(nm + l - 2, ".c") != 0) continue;
++        if (!strstr(nm, "_full") && !strstr(nm, "_dispatch.c")) continue;
++        if (n == cap) {
++            cap *= 2;
++            char **grown = (char **)realloc(names, sizeof(char *) * (size_t)cap);
++            if (!grown) break;
++            names = grown;
++        }
++        names[n++] = strdup(nm);
++    }
++    closedir(d);
++    if (!names) return -1;
++    qsort(names, (size_t)n, sizeof(char *), cmp_names);
++    *out = names;
++    return n;
++}
++
++int psx_dynamic_game_load(const char *gen_dir, const char *tcc_dir,
++                          char *err, size_t err_len)
++{
++    ErrBuf e = { err, err_len };
++    if (err && err_len) err[0] = '\0';
++    if (s_tcc) return 0;
++    if (!gen_dir || !is_dir(gen_dir)) {
++        err_printf(&e, "no translated game in %s", gen_dir ? gen_dir : "(null)");
++        return -1;
++    }
++
++    char **names = NULL;
++    const int count = list_game_sources(gen_dir, &names);
++    if (count <= 0) {
++        err_printf(&e, "no recompiled C in %s", gen_dir);
++        free(names);
++        return -1;
++    }
++
++    TCCState *s = tcc_new();
++    if (!s) {
++        err_printf(&e, "tcc_new failed");
++        return -1;
++    }
++    tcc_set_error_func(s, &e, collect_tcc_error);
++    tcc_set_lib_path(s, tcc_dir);
++    /* Headers come only from tcc_dir (no host sysroot is assumed), and
++     * nothing is linked in: every external the translation references lives
++     * in this process and is resolved with dlsym at relocation time. */
++    tcc_set_options(s, "-nostdinc -nostdlib " PSX_DYNAMIC_GAME_CFLAGS);
++    tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
++
++    char path[1024];
++    static const char *const k_inc[] = { "include", "psx", "libc" };
++    for (size_t i = 0; i < sizeof(k_inc) / sizeof(k_inc[0]); i++) {
++        snprintf(path, sizeof(path), "%s/%s", tcc_dir, k_inc[i]);
++        if (is_dir(path)) tcc_add_sysinclude_path(s, path);
++    }
++    /* Without the minimal libc headers (tcc_dir/libc, staged for Android),
++     * take stdint.h / stdio.h / string.h from the host system. */
++    snprintf(path, sizeof(path), "%s/libc", tcc_dir);
++    if (!is_dir(path)) {
++        tcc_add_sysinclude_path(s, "/usr/include");
++#if defined(__x86_64__)
++        tcc_add_sysinclude_path(s, "/usr/include/x86_64-linux-gnu");
++#elif defined(__aarch64__)
++        tcc_add_sysinclude_path(s, "/usr/include/aarch64-linux-gnu");
++#endif
++    }
++    tcc_add_include_path(s, gen_dir);
++    for (size_t i = 0; i < sizeof(k_entry_points) / sizeof(k_entry_points[0]); i++)
++        tcc_define_symbol(s, k_entry_points[i][0], k_entry_points[i][1]);
++    for (size_t i = 0; i < sizeof(k_tcc_builtins) / sizeof(k_tcc_builtins[0]); i++)
++        tcc_add_symbol(s, k_tcc_builtins[i].name, k_tcc_builtins[i].fn);
++
++    int rc = 0;
++    for (int i = 0; i < count && rc == 0; i++) {
++        snprintf(path, sizeof(path), "%s/%s", gen_dir, names[i]);
++        if (tcc_add_file(s, path) < 0) {
++            err_printf(&e, "while compiling %s\n", names[i]);
++            rc = -1;
++        }
++    }
++    for (int i = 0; i < count; i++) free(names[i]);
++    free(names);
++
++    if (rc == 0 && tcc_relocate(s) < 0) {
++        err_printf(&e, "relocation failed\n");
++        rc = -1;
++    }
++    if (rc == 0) {
++        void *sym[5];
++        for (size_t i = 0; i < 5; i++) {
++            sym[i] = tcc_get_symbol(s, k_entry_points[i][1]);
++            if (!sym[i]) {
++                err_printf(&e, "translation has no %s\n", k_entry_points[i][0]);
++                rc = -1;
++            }
++        }
++        if (rc == 0) {
++            s_address_in_text     = (int (*)(uint32_t))sym[0];
++            s_text_native_ok      = (int (*)(uint32_t))sym[1];
++            s_text_native_ok_full = (int (*)(uint32_t))sym[2];
++            s_dispatch            = (int (*)(CPUState *, uint32_t))sym[3];
++            s_is_entry            = (int (*)(uint32_t))sym[4];
++        }
++    }
++    if (rc != 0) {
++        tcc_delete(s);
++        return -1;
++    }
++    s_tcc = s;
++    fprintf(stdout, "psxrecomp: loaded the translated game (%d source files) from %s\n",
++            count, gen_dir);
++    fflush(stdout);
++    return 0;
++}
+diff --git a/runtime/src/psx_fiber.c b/runtime/src/psx_fiber.c
+index a379eca..65cb1dd 100644
+--- a/runtime/src/psx_fiber.c
++++ b/runtime/src/psx_fiber.c
+@@ -34,6 +34,197 @@ psx_fiber_t psx_fiber_create(size_t stack_size, psx_fiber_entry entry, void* arg
+ void psx_fiber_switch(psx_fiber_t target) { SwitchToFiber((LPVOID)target); }
+ void psx_fiber_destroy(psx_fiber_t fiber) { if (fiber) DeleteFiber((LPVOID)fiber); }
+ 
++#elif defined(__ANDROID__) && (defined(__aarch64__) || defined(__x86_64__))
++
++/* Android: bionic has no getcontext/makecontext/swapcontext, so switch stacks
++ * with a small hand-written routine instead. Every switch is an ordinary C
++ * call into psx_fiber_ctx_switch, so only the callee-saved registers have to
++ * be preserved: they are pushed onto the outgoing stack, the stack pointer is
++ * stored in the outgoing fiber, and the incoming fiber's stack is popped. */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++typedef struct psx_fiber_impl {
++    void*           sp;       /* saved stack pointer while suspended */
++    void*           stack;    /* NULL for the thread-fiber */
++    psx_fiber_entry entry;
++    void*           arg;
++} psx_fiber_impl;
++
++/* Cooperative + single-threaded, so a plain static tracks who's running. */
++static psx_fiber_impl* s_current = NULL;
++
++void psx_fiber_ctx_switch(void** save_sp, void* load_sp)
++    __attribute__((visibility("hidden")));
++void psx_fiber_ctx_start(void) __attribute__((visibility("hidden")));
++
++/* First C frame of a new fiber; psx_fiber_ctx_start passes the fiber in. */
++__attribute__((visibility("hidden"), used, noreturn))
++void psx_fiber_run_entry(psx_fiber_impl* f)
++{
++    f->entry(f->arg);
++    /* The BIOS thread entry never returns normally (it switches back to its
++     * scheduler target, or trap_crashes). Reaching here is a bug. */
++    abort();
++}
++
++#if defined(__aarch64__)
++/* Frame: x19-x28, x29/x30, d8-d15 = 20 slots, 160 bytes (16-aligned). */
++#define PSX_FIBER_FRAME_BYTES 160
++#define PSX_FIBER_ARG_SLOT    0    /* x19 carries the fiber into ctx_start */
++#define PSX_FIBER_FP_SLOT     10   /* x29 */
++#define PSX_FIBER_RET_SLOT    11   /* x30 */
++__asm__(
++    ".text\n"
++    ".p2align 2\n"
++    ".global psx_fiber_ctx_switch\n"
++    ".hidden psx_fiber_ctx_switch\n"
++    ".type psx_fiber_ctx_switch, %function\n"
++    "psx_fiber_ctx_switch:\n"
++    "    sub  sp, sp, #160\n"
++    "    stp  x19, x20, [sp, #0]\n"
++    "    stp  x21, x22, [sp, #16]\n"
++    "    stp  x23, x24, [sp, #32]\n"
++    "    stp  x25, x26, [sp, #48]\n"
++    "    stp  x27, x28, [sp, #64]\n"
++    "    stp  x29, x30, [sp, #80]\n"
++    "    stp  d8,  d9,  [sp, #96]\n"
++    "    stp  d10, d11, [sp, #112]\n"
++    "    stp  d12, d13, [sp, #128]\n"
++    "    stp  d14, d15, [sp, #144]\n"
++    "    mov  x9, sp\n"
++    "    str  x9, [x0]\n"
++    "    mov  sp, x1\n"
++    "    ldp  x19, x20, [sp, #0]\n"
++    "    ldp  x21, x22, [sp, #16]\n"
++    "    ldp  x23, x24, [sp, #32]\n"
++    "    ldp  x25, x26, [sp, #48]\n"
++    "    ldp  x27, x28, [sp, #64]\n"
++    "    ldp  x29, x30, [sp, #80]\n"
++    "    ldp  d8,  d9,  [sp, #96]\n"
++    "    ldp  d10, d11, [sp, #112]\n"
++    "    ldp  d12, d13, [sp, #128]\n"
++    "    ldp  d14, d15, [sp, #144]\n"
++    "    add  sp, sp, #160\n"
++    "    ret\n"
++    ".size psx_fiber_ctx_switch, .-psx_fiber_ctx_switch\n"
++    ".p2align 2\n"
++    ".global psx_fiber_ctx_start\n"
++    ".hidden psx_fiber_ctx_start\n"
++    ".type psx_fiber_ctx_start, %function\n"
++    "psx_fiber_ctx_start:\n"
++    "    mov  x0, x19\n"
++    "    mov  x29, #0\n"
++    "    bl   psx_fiber_run_entry\n"
++    "    brk  #0\n"
++    ".size psx_fiber_ctx_start, .-psx_fiber_ctx_start\n");
++#else /* __x86_64__ (the Android emulator) */
++/* Frame: mxcsr + x87 control word, r15, r14, r13, r12, rbx, rbp, return
++ * address = 8 slots, 64 bytes. */
++#define PSX_FIBER_FRAME_BYTES 64
++#define PSX_FIBER_ARG_SLOT    5    /* rbx carries the fiber into ctx_start */
++#define PSX_FIBER_FP_SLOT     6    /* rbp */
++#define PSX_FIBER_RET_SLOT    7
++__asm__(
++    ".text\n"
++    ".p2align 4\n"
++    ".global psx_fiber_ctx_switch\n"
++    ".hidden psx_fiber_ctx_switch\n"
++    ".type psx_fiber_ctx_switch, @function\n"
++    "psx_fiber_ctx_switch:\n"
++    "    pushq %rbp\n"
++    "    pushq %rbx\n"
++    "    pushq %r12\n"
++    "    pushq %r13\n"
++    "    pushq %r14\n"
++    "    pushq %r15\n"
++    "    subq  $8, %rsp\n"
++    "    stmxcsr (%rsp)\n"
++    "    fnstcw 4(%rsp)\n"
++    "    movq  %rsp, (%rdi)\n"
++    "    movq  %rsi, %rsp\n"
++    "    ldmxcsr (%rsp)\n"
++    "    fldcw 4(%rsp)\n"
++    "    addq  $8, %rsp\n"
++    "    popq  %r15\n"
++    "    popq  %r14\n"
++    "    popq  %r13\n"
++    "    popq  %r12\n"
++    "    popq  %rbx\n"
++    "    popq  %rbp\n"
++    "    ret\n"
++    ".size psx_fiber_ctx_switch, .-psx_fiber_ctx_switch\n"
++    ".p2align 4\n"
++    ".global psx_fiber_ctx_start\n"
++    ".hidden psx_fiber_ctx_start\n"
++    ".type psx_fiber_ctx_start, @function\n"
++    "psx_fiber_ctx_start:\n"
++    "    movq  %rbx, %rdi\n"
++    "    xorl  %ebp, %ebp\n"
++    "    call  psx_fiber_run_entry\n"
++    "    ud2\n"
++    ".size psx_fiber_ctx_start, .-psx_fiber_ctx_start\n");
++#endif
++
++psx_fiber_t psx_fiber_convert_thread(void)
++{
++    if (!s_current) {
++        psx_fiber_impl* f = (psx_fiber_impl*)calloc(1, sizeof(*f));
++        if (!f) return NULL;
++        f->stack = NULL;       /* runs on the real thread stack */
++        s_current = f;
++    }
++    return (psx_fiber_t)s_current;
++}
++
++psx_fiber_t psx_fiber_current(void) { return (psx_fiber_t)s_current; }
++
++psx_fiber_t psx_fiber_create(size_t stack_size, psx_fiber_entry entry, void* arg)
++{
++    if (stack_size < 64u * 1024u) stack_size = 64u * 1024u;
++    psx_fiber_impl* f = (psx_fiber_impl*)calloc(1, sizeof(*f));
++    if (!f) return NULL;
++    f->stack = malloc(stack_size);
++    if (!f->stack) { free(f); return NULL; }
++    f->entry = entry;
++    f->arg   = arg;
++
++    /* Build the frame psx_fiber_ctx_switch pops, so the first switch here
++     * "returns" into psx_fiber_ctx_start with the fiber in a callee-saved
++     * register and a 16-byte aligned stack. */
++    uintptr_t top = ((uintptr_t)f->stack + stack_size) & ~(uintptr_t)15;
++    uint64_t* frame = (uint64_t*)(top - PSX_FIBER_FRAME_BYTES);
++    memset(frame, 0, PSX_FIBER_FRAME_BYTES);
++#if defined(__x86_64__)
++    frame[0] = 0x1F80u | ((uint64_t)0x037Fu << 32);  /* default mxcsr / x87 cw */
++#endif
++    frame[PSX_FIBER_ARG_SLOT] = (uint64_t)(uintptr_t)f;
++    frame[PSX_FIBER_FP_SLOT]  = 0;
++    frame[PSX_FIBER_RET_SLOT] = (uint64_t)(uintptr_t)&psx_fiber_ctx_start;
++    f->sp = frame;
++    return (psx_fiber_t)f;
++}
++
++void psx_fiber_switch(psx_fiber_t target)
++{
++    psx_fiber_impl* to   = (psx_fiber_impl*)target;
++    psx_fiber_impl* from = s_current;
++    if (!to || to == from) return;
++    s_current = to;
++    psx_fiber_ctx_switch(&from->sp, to->sp);
++    /* Resumed: s_current was set back to `from` by whoever switched here. */
++}
++
++void psx_fiber_destroy(psx_fiber_t fiber)
++{
++    psx_fiber_impl* f = (psx_fiber_impl*)fiber;
++    if (!f) return;
++    free(f->stack);
++    free(f);
++}
++
+ #else /* POSIX: ucontext */
+ 
+ #ifndef _XOPEN_SOURCE
+diff --git a/runtime/src/psx_translate.cpp b/runtime/src/psx_translate.cpp
+new file mode 100644
+index 0000000..ba26eeb
+--- /dev/null
++++ b/runtime/src/psx_translate.cpp
+@@ -0,0 +1,168 @@
++/*
++ * psx_translate.cpp — translate the player's own disc into C, in-process.
++ *
++ * The PSX_DYNAMIC_GAME counterpart of `psxrecomp_cli.py generate`: pull the
++ * boot executable off the disc image, check it is the build this port was
++ * made for, and run psxrecomp-game's pipeline (linked into this binary with
++ * its entry point renamed psxrecomp_game_main) to write generated/*.c, which
++ * psx_dynamic_game_load() then compiles at every launch.
++ */
++#include "psx_translate.h"
++
++#include "iso_reader.h"
++
++extern "C" {
++#include "psx_sha256.h"
++}
++#include "overlay_codegen_hash.h"
++
++#include <cstdarg>
++#include <cstdio>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <string>
++#include <vector>
++
++#include <unistd.h>
++
++/* psxrecomp-game's main(), renamed at compile time (runtime.cmake). */
++int psxrecomp_game_main(int argc, char** argv);
++
++namespace {
++
++/* Changes whenever the recompiler's code generation does, so an app update
++ * with a newer recompiler re-translates instead of loading stale C. */
++std::string translate_version() {
++    char buf[32];
++    snprintf(buf, sizeof(buf), "cg-%08x", (unsigned)PSX_OVERLAY_CODEGEN_HASH);
++    return buf;
++}
++
++void set_err(char* err, size_t len, const char* fmt, ...) {
++    if (!err || !len) return;
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(err, len, fmt, ap);
++    va_end(ap);
++}
++
++std::string to_hex(const uint8_t* d, size_t n) {
++    static const char* k = "0123456789abcdef";
++    std::string s;
++    for (size_t i = 0; i < n; i++) { s += k[d[i] >> 4]; s += k[d[i] & 15]; }
++    return s;
++}
++
++bool read_disc_file(PS1::ISOReader& iso, const std::string& name,
++                    std::vector<uint8_t>& out) {
++    PS1::ISOFileEntry e;
++    if (!iso.FindFile(name, e) || e.is_directory) return false;
++    out.assign(e.size, 0);
++    uint8_t sector[2048];
++    for (uint32_t off = 0, lba = e.lba; off < e.size; off += 2048, lba++) {
++        if (!iso.ReadSector(lba, sector)) return false;
++        const uint32_t n = (e.size - off) < 2048 ? (e.size - off) : 2048;
++        std::memcpy(out.data() + off, sector, n);
++    }
++    return true;
++}
++
++/* BOOT = cdrom:\SLUS_010.32;1  ->  SLUS_010.32 */
++std::string boot_exe_from_system_cnf(const std::vector<uint8_t>& cnf) {
++    const std::string text(cnf.begin(), cnf.end());
++    size_t p = text.find("BOOT");
++    if (p == std::string::npos) return {};
++    p = text.find_first_of(":\\", p);
++    if (p == std::string::npos) return {};
++    while (p < text.size() && (text[p] == ':' || text[p] == '\\')) p++;
++    size_t end = text.find_first_of(";\r\n \t", p);
++    return text.substr(p, end == std::string::npos ? std::string::npos : end - p);
++}
++
++bool write_file(const std::filesystem::path& p, const void* data, size_t n) {
++    std::filesystem::create_directories(p.parent_path());
++    std::ofstream f(p, std::ios::binary | std::ios::trunc);
++    f.write(static_cast<const char*>(data), (std::streamsize)n);
++    return (bool)f;
++}
++
++}  // namespace
++
++extern "C" int psx_translate_disc(const char* data_dir, const char* disc_path,
++                                  const char* expect_exe_sha256,
++                                  char* err, size_t err_len) {
++    namespace fs = std::filesystem;
++    if (err && err_len) err[0] = '\0';
++
++    PS1::ISOReader iso;
++    if (!iso.Open(disc_path)) {
++        set_err(err, err_len, "Could not read the disc image (%s).", disc_path);
++        return -1;
++    }
++    std::vector<uint8_t> cnf, exe;
++    if (!read_disc_file(iso, "SYSTEM.CNF", cnf)) {
++        set_err(err, err_len, "This is not a PlayStation disc (no SYSTEM.CNF).");
++        return -1;
++    }
++    const std::string exe_name = boot_exe_from_system_cnf(cnf);
++    if (exe_name.empty() || !read_disc_file(iso, exe_name, exe)) {
++        set_err(err, err_len, "Could not find the game's program on the disc.");
++        return -1;
++    }
++    uint8_t digest[32];
++    psx_sha256_ctx ctx;
++    psx_sha256_init(&ctx);
++    psx_sha256_update(&ctx, exe.data(), exe.size());
++    psx_sha256_final(&ctx, digest);
++    const std::string exe_sha = to_hex(digest, sizeof(digest));
++    if (expect_exe_sha256 && expect_exe_sha256[0] && exe_sha != expect_exe_sha256) {
++        set_err(err, err_len,
++                "This disc's program (%s) is not the version this app supports.",
++                exe_name.c_str());
++        return -2;
++    }
++
++    const fs::path root(data_dir);
++    if (!write_file(root / "disc" / exe_name, exe.data(), exe.size()) ||
++        !write_file(root / "disc" / "SYSTEM.CNF", cnf.data(), cnf.size())) {
++        set_err(err, err_len, "Could not write to %s.", data_dir);
++        return -1;
++    }
++
++    /* psxrecomp-game resolves game.toml's relative paths (exe, seeds,
++     * out_dir) against the working directory. */
++    char old_cwd[4096];
++    if (!getcwd(old_cwd, sizeof(old_cwd))) old_cwd[0] = '\0';
++    if (chdir(data_dir) != 0) {
++        set_err(err, err_len, "Could not enter %s.", data_dir);
++        return -1;
++    }
++    std::error_code ec;
++    fs::remove(root / "generated" / ".translated", ec);
++    char a0[] = "psxrecomp-game", a1[] = "--config", a2[] = "game.toml";
++    char* argv[] = { a0, a1, a2, nullptr };
++    std::fflush(stdout);
++    const int rc = psxrecomp_game_main(3, argv);
++    std::fflush(stdout);
++    if (old_cwd[0]) (void)!chdir(old_cwd);
++    if (rc != 0) {
++        set_err(err, err_len, "The recompiler failed (code %d); see log.txt.", rc);
++        return -1;
++    }
++    /* Stamp what was translated, so a changed disc or a newer recompiler
++     * triggers a fresh translation (psx_translate_is_current). */
++    const std::string stamp = exe_sha + "\n" + translate_version() + "\n";
++    write_file(root / "generated" / ".translated", stamp.data(), stamp.size());
++    return 0;
++}
++
++extern "C" int psx_translate_is_current(const char* data_dir,
++                                        const char* expect_exe_sha256) {
++    std::ifstream f(std::filesystem::path(data_dir) / "generated" / ".translated");
++    std::string sha, version;
++    if (!std::getline(f, sha) || !std::getline(f, version)) return 0;
++    if (expect_exe_sha256 && expect_exe_sha256[0] && sha != expect_exe_sha256)
++        return 0;
++    return version == translate_version();
++}
+diff --git a/runtime/third_party/tcc_libc/stdint.h b/runtime/third_party/tcc_libc/stdint.h
+new file mode 100644
+index 0000000..f15ca7a
+--- /dev/null
++++ b/runtime/third_party/tcc_libc/stdint.h
+@@ -0,0 +1,62 @@
++/* Minimal <stdint.h> for compiling the translated game with TinyCC on hosts
++ * that have no C headers (Android). LP64 only (arm64, x86_64). */
++#ifndef PSX_TCC_STDINT_H
++#define PSX_TCC_STDINT_H
++
++typedef signed char        int8_t;
++typedef short              int16_t;
++typedef int                int32_t;
++typedef long               int64_t;
++typedef unsigned char      uint8_t;
++typedef unsigned short     uint16_t;
++typedef unsigned int       uint32_t;
++typedef unsigned long      uint64_t;
++
++typedef int8_t   int_least8_t;   typedef uint8_t  uint_least8_t;
++typedef int16_t  int_least16_t;  typedef uint16_t uint_least16_t;
++typedef int32_t  int_least32_t;  typedef uint32_t uint_least32_t;
++typedef int64_t  int_least64_t;  typedef uint64_t uint_least64_t;
++typedef int8_t   int_fast8_t;    typedef uint8_t  uint_fast8_t;
++typedef int64_t  int_fast16_t;   typedef uint64_t uint_fast16_t;
++typedef int64_t  int_fast32_t;   typedef uint64_t uint_fast32_t;
++typedef int64_t  int_fast64_t;   typedef uint64_t uint_fast64_t;
++
++typedef long           intptr_t;
++typedef unsigned long  uintptr_t;
++typedef long           intmax_t;
++typedef unsigned long  uintmax_t;
++
++#define INT8_MIN    (-128)
++#define INT16_MIN   (-32767-1)
++#define INT32_MIN   (-2147483647-1)
++#define INT64_MIN   (-9223372036854775807L-1)
++#define INT8_MAX    127
++#define INT16_MAX   32767
++#define INT32_MAX   2147483647
++#define INT64_MAX   9223372036854775807L
++#define UINT8_MAX   255
++#define UINT16_MAX  65535
++#define UINT32_MAX  4294967295U
++#define UINT64_MAX  18446744073709551615UL
++#define INTPTR_MIN  INT64_MIN
++#define INTPTR_MAX  INT64_MAX
++#define UINTPTR_MAX UINT64_MAX
++#define INTMAX_MIN  INT64_MIN
++#define INTMAX_MAX  INT64_MAX
++#define UINTMAX_MAX UINT64_MAX
++#define SIZE_MAX    UINT64_MAX
++#define PTRDIFF_MIN INT64_MIN
++#define PTRDIFF_MAX INT64_MAX
++
++#define INT8_C(c)   c
++#define INT16_C(c)  c
++#define INT32_C(c)  c
++#define INT64_C(c)  c ## L
++#define UINT8_C(c)  c
++#define UINT16_C(c) c
++#define UINT32_C(c) c ## U
++#define UINT64_C(c) c ## UL
++#define INTMAX_C(c)  c ## L
++#define UINTMAX_C(c) c ## UL
++
++#endif
+diff --git a/runtime/third_party/tcc_libc/stdio.h b/runtime/third_party/tcc_libc/stdio.h
+new file mode 100644
+index 0000000..332a850
+--- /dev/null
++++ b/runtime/third_party/tcc_libc/stdio.h
+@@ -0,0 +1,31 @@
++/* Minimal <stdio.h> for compiling the translated game with TinyCC on hosts
++ * that have no C headers (Android). Only declarations: calls resolve to the
++ * running process's libc. */
++#ifndef PSX_TCC_STDIO_H
++#define PSX_TCC_STDIO_H
++
++#include <stddef.h>
++#include <stdarg.h>
++
++typedef struct __sFILE FILE;
++extern FILE *stdin;
++extern FILE *stdout;
++extern FILE *stderr;
++
++#define EOF (-1)
++
++int printf(const char *fmt, ...);
++int fprintf(FILE *f, const char *fmt, ...);
++int sprintf(char *buf, const char *fmt, ...);
++int snprintf(char *buf, size_t n, const char *fmt, ...);
++int vprintf(const char *fmt, va_list ap);
++int vfprintf(FILE *f, const char *fmt, va_list ap);
++int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
++int puts(const char *s);
++int fputs(const char *s, FILE *f);
++int fputc(int c, FILE *f);
++int putchar(int c);
++int fflush(FILE *f);
++size_t fwrite(const void *p, size_t size, size_t n, FILE *f);
++
++#endif
+diff --git a/runtime/third_party/tcc_libc/stdlib.h b/runtime/third_party/tcc_libc/stdlib.h
+new file mode 100644
+index 0000000..2d4c6e7
+--- /dev/null
++++ b/runtime/third_party/tcc_libc/stdlib.h
+@@ -0,0 +1,17 @@
++/* Minimal <stdlib.h> for compiling the translated game with TinyCC on hosts
++ * that have no C headers (Android). */
++#ifndef PSX_TCC_STDLIB_H
++#define PSX_TCC_STDLIB_H
++
++#include <stddef.h>
++
++void *malloc(size_t n);
++void *calloc(size_t n, size_t size);
++void *realloc(void *p, size_t n);
++void  free(void *p);
++void  abort(void);
++void  exit(int code);
++int   abs(int v);
++long  labs(long v);
++
++#endif
+diff --git a/runtime/third_party/tcc_libc/string.h b/runtime/third_party/tcc_libc/string.h
+new file mode 100644
+index 0000000..6d14cb9
+--- /dev/null
++++ b/runtime/third_party/tcc_libc/string.h
+@@ -0,0 +1,23 @@
++/* Minimal <string.h> for compiling the translated game with TinyCC on hosts
++ * that have no C headers (Android). */
++#ifndef PSX_TCC_STRING_H
++#define PSX_TCC_STRING_H
++
++#include <stddef.h>
++
++void  *memcpy(void *dst, const void *src, size_t n);
++void  *memmove(void *dst, const void *src, size_t n);
++void  *memset(void *dst, int c, size_t n);
++int    memcmp(const void *a, const void *b, size_t n);
++void  *memchr(const void *p, int c, size_t n);
++size_t strlen(const char *s);
++int    strcmp(const char *a, const char *b);
++int    strncmp(const char *a, const char *b, size_t n);
++char  *strcpy(char *dst, const char *src);
++char  *strncpy(char *dst, const char *src, size_t n);
++char  *strcat(char *dst, const char *src);
++char  *strchr(const char *s, int c);
++char  *strrchr(const char *s, int c);
++char  *strstr(const char *h, const char *n);
++
++#endif
+diff --git a/runtime/third_party/tinycc_config/config.h b/runtime/third_party/tinycc_config/config.h
+new file mode 100644
+index 0000000..334a6f7
+--- /dev/null
++++ b/runtime/third_party/tinycc_config/config.h
+@@ -0,0 +1,12 @@
++/* TinyCC configuration for the libtcc embedded in PSX_DYNAMIC_GAME builds.
++ * This replaces the config.h tinycc's configure script would write; the
++ * target CPU (TCC_TARGET_*) and OS (TARGETOS_*) come from the build's -D
++ * flags, and the header/library directory is set at run time with
++ * tcc_set_lib_path(). */
++#define TCC_VERSION "0.9.28rc"
++#define CONFIG_TCC_PREDEFS 1
++#define CONFIG_TCC_BACKTRACE 0
++#define CONFIG_TCC_BCHECK 0
++#ifndef CONFIG_TCCDIR
++#define CONFIG_TCCDIR ""
++#endif
+diff --git a/tools/stage_tcc_headers.py b/tools/stage_tcc_headers.py
+new file mode 100644
+index 0000000..6b4a76d
+--- /dev/null
++++ b/tools/stage_tcc_headers.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python3
++"""Stage the headers a PSX_DYNAMIC_GAME runtime compiles the translated game
++against (see runtime/src/psx_dynamic_game.c):
++
++    <out>/include  TinyCC's own headers (stddef.h, stdarg.h, ...)
++    <out>/psx      the runtime headers the generated C includes
++    <out>/libc     minimal libc headers (only with --libc; for Android, which
++                   has no system headers on the device)
++
++Runtime headers are copied with any UTF-8 byte-order mark removed."""
++import argparse
++import os
++import shutil
++
++
++def copy_headers(src, dst):
++    os.makedirs(dst, exist_ok=True)
++    for name in sorted(os.listdir(src)):
++        if not name.endswith(".h"):
++            continue
++        with open(os.path.join(src, name), "rb") as f:
++            data = f.read()
++        if data.startswith(b"\xef\xbb\xbf"):
++            data = data[3:]
++        out = os.path.join(dst, name)
++        try:
++            with open(out, "rb") as f:
++                if f.read() == data:
++                    continue
++        except OSError:
++            pass
++        with open(out, "wb") as f:
++            f.write(data)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--tinycc", required=True, help="tinycc source tree")
++    ap.add_argument("--runtime-include", required=True)
++    ap.add_argument("--libc", default="", help="minimal libc header dir")
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    copy_headers(os.path.join(a.tinycc, "include"), os.path.join(a.out, "include"))
++    copy_headers(a.runtime_include, os.path.join(a.out, "psx"))
++    if a.libc:
++        copy_headers(a.libc, os.path.join(a.out, "libc"))
++    elif os.path.isdir(os.path.join(a.out, "libc")):
++        shutil.rmtree(os.path.join(a.out, "libc"))
++
++
++if __name__ == "__main__":
++    main()

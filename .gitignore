@@ -1,0 +1,10 @@
+# Only our own sources are tracked. Everything else in this folder (the
+# upstream checkouts in digimon-recomp/, disc images, built APKs) stays out.
+/*
+!/.gitignore
+!/README.md
+!/setup.sh
+!/android/
+!/patches/
+/android/out/
+/android/keystore/

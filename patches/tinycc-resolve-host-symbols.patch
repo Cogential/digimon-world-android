@@ -1,0 +1,17 @@
+diff --git a/tccelf.c b/tccelf.c
+index def5aebc..04bb479b 100644
+--- a/tccelf.c
++++ b/tccelf.c
+@@ -1099,8 +1099,10 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
+                 /* dlsym() needs the undecorated name.  */
+                 const char *name_ud = &name[s1->leading_underscore];
+                 void *addr = NULL;
+-                if (!s1->nostdlib)
+-                    addr = dlsym(RTLD_DEFAULT, name_ud);
++                /* psxrecomp: an embedding host that compiles to memory with
++                   -nostdlib supplies every external itself, so look symbols
++                   up in the running process regardless. */
++                addr = dlsym(RTLD_DEFAULT, name_ud);
+ 		if (addr == NULL) {
+ 		    int i;
+ 		    for (i = 0; i < s1->nb_loaded_dlls; i++)
