@@ -33,10 +33,11 @@ namespace {
 /* ---- settings file -------------------------------------------------------- */
 
 const char *const k_el_keys[EL_COUNT] = {
-    "dpad", "face", "l1", "l2", "r1", "r2", "select", "start", "menu", "ff" };
+    "dpad", "triangle", "circle", "cross", "square", "l1", "l2", "r1", "r2",
+    "select", "start", "menu", "ff" };
 const char *const k_el_names[EL_COUNT] = {
-    "D-pad", "Face buttons", "L1", "L2", "R1", "R2", "Select", "Start",
-    "Menu button", "Fast-forward button" };
+    "D-pad", "Triangle", "Circle", "Cross", "Square", "L1", "L2", "R1", "R2",
+    "Select", "Start", "Menu button", "Fast-forward button" };
 constexpr float k_el_min_scale = 0.5f, k_el_max_scale = 2.5f;
 
 std::string settings_path() { return g_ui.data_dir + "/ui_settings.ini"; }
@@ -52,6 +53,7 @@ void load_settings() {
         if (std::sscanf(line, " %63[^=]=%127s", key, val) != 2) continue;
         const std::string k = key;
         if (k == "touch_mode") s.touch_mode = std::clamp(std::atoi(val), 0, 2);
+        else if (k == "screen_fit") s.screen_fit = std::clamp(std::atoi(val), 0, 2);
         else if (k == "touch_opacity") s.touch_opacity = std::clamp((float)std::atof(val), 0.1f, 1.0f);
         else if (k == "touch_scale") s.touch_scale = std::clamp((float)std::atof(val), 0.6f, 1.6f);
         else if (k == "speed") s.speed = std::clamp((float)std::atof(val), 0.25f, 8.0f);
@@ -59,8 +61,12 @@ void load_settings() {
         else if (k == "show_fps") s.show_fps = std::atoi(val) != 0;
         else if (k == "volume") s.volume = std::clamp(std::atoi(val), 0, 100);
         else if (k.rfind("ctl_", 0) == 0) {
+            /* ctl_face (the four face buttons moved as one, before they could
+             * be placed singly) seeds all four. */
+            const bool face = k == "ctl_face";
             for (int e = 0; e < EL_COUNT; e++) {
-                if (k.compare(4, std::string::npos, k_el_keys[e]) != 0) continue;
+                const bool is_face = e >= EL_TRIANGLE && e <= EL_SQUARE;
+                if (!(face && is_face) && k.compare(4, std::string::npos, k_el_keys[e]) != 0) continue;
                 float dx = 0, dy = 0, sc = 1;
                 if (std::sscanf(val, "%f,%f,%f", &dx, &dy, &sc) == 3) {
                     s.ctl[e].dx = std::clamp(dx, -1.0f, 1.0f);
@@ -178,14 +184,19 @@ void layout_touch() {
     s_dpad_r = dr * sc(EL_DPAD);
 
     {
-        const float d0 = 10.5f * u, r0 = 6.2f * u;
-        const ImVec2 f = place(EL_FACE, ImVec2(W - 6.0f * u - 17.0f * u, H - 8.0f * u - 17.0f * u),
-                               ImVec2(d0 + r0, d0 + r0));
-        const float d = d0 * sc(EL_FACE), r = r0 * sc(EL_FACE);
-        s_buttons.push_back({EL_FACE, PADB_TRIANGLE, CTL_BUTTON, SH_TRIANGLE, ImVec2(f.x, f.y - d), ImVec2(r, r), nullptr});
-        s_buttons.push_back({EL_FACE, PADB_CIRCLE, CTL_BUTTON, SH_CIRCLE, ImVec2(f.x + d, f.y), ImVec2(r, r), nullptr});
-        s_buttons.push_back({EL_FACE, PADB_CROSS, CTL_BUTTON, SH_CROSS, ImVec2(f.x, f.y + d), ImVec2(r, r), nullptr});
-        s_buttons.push_back({EL_FACE, PADB_SQUARE, CTL_BUTTON, SH_SQUARE, ImVec2(f.x - d, f.y), ImVec2(r, r), nullptr});
+        /* The face buttons default to a diamond, but each is its own control. */
+        const float d = 10.5f * u, r = 6.2f * u;
+        const ImVec2 f(W - 6.0f * u - 17.0f * u, H - 8.0f * u - 17.0f * u);
+        struct Face { int el; uint16_t bit; Shape shape; ImVec2 home; } faces[] = {
+            {EL_TRIANGLE, PADB_TRIANGLE, SH_TRIANGLE, ImVec2(f.x, f.y - d)},
+            {EL_CIRCLE, PADB_CIRCLE, SH_CIRCLE, ImVec2(f.x + d, f.y)},
+            {EL_CROSS, PADB_CROSS, SH_CROSS, ImVec2(f.x, f.y + d)},
+            {EL_SQUARE, PADB_SQUARE, SH_SQUARE, ImVec2(f.x - d, f.y)},
+        };
+        for (const Face &b : faces) {
+            const ImVec2 c = place(b.el, b.home, ImVec2(r, r));
+            s_buttons.push_back({b.el, b.bit, CTL_BUTTON, b.shape, c, s_el_half[b.el], nullptr});
+        }
     }
 
     struct Simple { int el; uint16_t bit; CtlKind kind; Shape shape; ImVec2 home, half; const char *label; };
@@ -402,11 +413,15 @@ void draw_touch(ImDrawList *dl) {
     uint16_t held = s_touch_bits;
     const float arm = s_dpad_r * 0.36f;
     const ImU32 base = col(20, 22, 30, a * 0.75f), edge = col(200, 205, 220, a);
-    dl->AddCircleFilled(s_dpad_c, s_dpad_r * 1.08f, col(0, 0, 0, a * 0.25f), 48);
-    dl->AddRectFilled(ImVec2(s_dpad_c.x - arm, s_dpad_c.y - s_dpad_r),
-                      ImVec2(s_dpad_c.x + arm, s_dpad_c.y + s_dpad_r), base, arm * 0.35f);
-    dl->AddRectFilled(ImVec2(s_dpad_c.x - s_dpad_r, s_dpad_c.y - arm),
-                      ImVec2(s_dpad_c.x + s_dpad_r, s_dpad_c.y + arm), base, arm * 0.35f);
+    const float cx = s_dpad_c.x, cy = s_dpad_c.y, R = s_dpad_r, rr = arm * 0.35f;
+    dl->AddCircleFilled(s_dpad_c, R * 1.08f, col(0, 0, 0, a * 0.25f), 48);
+    /* Fill the cross as three pieces that do not overlap, so the translucent
+     * centre is no darker than the arms. */
+    dl->AddRectFilled(ImVec2(cx - R, cy - arm), ImVec2(cx + R, cy + arm), base, rr);
+    dl->AddRectFilled(ImVec2(cx - arm, cy - R), ImVec2(cx + arm, cy - arm), base, rr,
+                      ImDrawFlags_RoundCornersTop);
+    dl->AddRectFilled(ImVec2(cx - arm, cy + arm), ImVec2(cx + arm, cy + R), base, rr,
+                      ImDrawFlags_RoundCornersBottom);
     struct Arm { uint16_t bit; float dx, dy; } arms[4] = {
         {PADB_UP, 0, -1}, {PADB_DOWN, 0, 1}, {PADB_LEFT, -1, 0}, {PADB_RIGHT, 1, 0}};
     for (const Arm &m : arms) {
@@ -418,10 +433,22 @@ void draw_touch(ImDrawList *dl) {
         const bool on = (held & m.bit) != 0;
         dl->AddTriangleFilled(tip, bl, br, on ? col(255, 255, 255, a) : col(150, 155, 170, a));
     }
-    dl->AddRect(ImVec2(s_dpad_c.x - arm, s_dpad_c.y - s_dpad_r),
-                ImVec2(s_dpad_c.x + arm, s_dpad_c.y + s_dpad_r), edge, arm * 0.35f, 0, line * 0.6f);
-    dl->AddRect(ImVec2(s_dpad_c.x - s_dpad_r, s_dpad_c.y - arm),
-                ImVec2(s_dpad_c.x + s_dpad_r, s_dpad_c.y + arm), edge, arm * 0.35f, 0, line * 0.6f);
+    /* One outline around the whole cross (rounded at the arm ends, square at
+     * the inner corners), rather than two rectangles crossing in the middle.
+     * ImGui arc angles count in twelfths of a turn, clockwise from +x. */
+    dl->PathArcToFast(ImVec2(cx - arm + rr, cy - R + rr), rr, 6, 9);   /* up arm */
+    dl->PathArcToFast(ImVec2(cx + arm - rr, cy - R + rr), rr, 9, 12);
+    dl->PathLineTo(ImVec2(cx + arm, cy - arm));
+    dl->PathArcToFast(ImVec2(cx + R - rr, cy - arm + rr), rr, 9, 12);  /* right arm */
+    dl->PathArcToFast(ImVec2(cx + R - rr, cy + arm - rr), rr, 0, 3);
+    dl->PathLineTo(ImVec2(cx + arm, cy + arm));
+    dl->PathArcToFast(ImVec2(cx + arm - rr, cy + R - rr), rr, 0, 3);   /* down arm */
+    dl->PathArcToFast(ImVec2(cx - arm + rr, cy + R - rr), rr, 3, 6);
+    dl->PathLineTo(ImVec2(cx - arm, cy + arm));
+    dl->PathArcToFast(ImVec2(cx - R + rr, cy + arm - rr), rr, 3, 6);   /* left arm */
+    dl->PathArcToFast(ImVec2(cx - R + rr, cy - arm + rr), rr, 6, 9);
+    dl->PathLineTo(ImVec2(cx - arm, cy - arm));
+    dl->PathStroke(edge, ImDrawFlags_Closed, line * 0.6f);
 
     for (const TouchButton &b : s_buttons) {
         const bool on = b.bit ? (held & b.bit) != 0 : (b.kind == CTL_FF && g_ui.ff_active);
@@ -548,13 +575,16 @@ void layout_editor() {
     /* The panel hides while a control is dragged, and steps aside from the
      * picked control so it never covers it. */
     if (s_edit_drag) return;
-    float panel_y = H * 0.5f;
+    ImVec2 panel_pos(W * 0.5f, H * 0.5f), pivot(0.5f, 0.5f);
     if (s_edit_sel >= 0) {
         const ImVec2 c = s_el_c[s_edit_sel];
-        if (std::fabs(c.x - W * 0.5f) < W * 0.3f && std::fabs(c.y - H * 0.5f) < H * 0.3f)
-            panel_y = c.y < H * 0.5f ? H * 0.78f : H * 0.22f;
+        const float edge = 6.0f * g_ui.dpi;
+        if (std::fabs(c.x - W * 0.5f) < W * 0.3f && std::fabs(c.y - H * 0.5f) < H * 0.3f) {
+            if (c.y < H * 0.5f) { panel_pos.y = H - edge; pivot.y = 1.0f; }  /* to the bottom edge */
+            else                { panel_pos.y = edge;     pivot.y = 0.0f; }  /* to the top edge */
+        }
     }
-    ImGui::SetNextWindowPos(ImVec2(W * 0.5f, panel_y), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowPos(panel_pos, ImGuiCond_Always, pivot);
     ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 17.0f, 0), ImVec2(W * 0.5f, H));
     ImGui::Begin("##layout", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -697,6 +727,7 @@ void ui_save_settings() {
     FILE *f = std::fopen(settings_path().c_str(), "w");
     if (!f) return;
     const UiSettings &s = g_ui.s;
+    std::fprintf(f, "screen_fit=%d\n", s.screen_fit);
     std::fprintf(f, "touch_mode=%d\ntouch_opacity=%.2f\ntouch_scale=%.2f\nspeed=%.2f\n"
                     "ff_speed=%.2f\nshow_fps=%d\nvolume=%d\n",
                  s.touch_mode, s.touch_opacity, s.touch_scale, s.speed, s.ff_speed,
@@ -795,6 +826,18 @@ extern "C" void psx_ui_render(SDL_Renderer *renderer) {
     ImGui::Render();
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
 
+    /* Put the game's logical size back, with the player's screen fit: its
+     * picture is letterboxed to its own aspect, and a phone wider than that
+     * either keeps the bars, stretches across them, or zooms to fill. Takes
+     * effect from the next frame. */
+    if (mode != SDL_LOGICAL_PRESENTATION_DISABLED) {
+        /* 4:3-only frames (title, movies) keep their shape. */
+        switch (psx_host_present_is_43() ? FIT_BARS : g_ui.s.screen_fit) {
+        case FIT_STRETCH: mode = SDL_LOGICAL_PRESENTATION_STRETCH; break;
+        case FIT_ZOOM: mode = SDL_LOGICAL_PRESENTATION_OVERSCAN; break;
+        default: mode = SDL_LOGICAL_PRESENTATION_LETTERBOX; break;
+        }
+    }
     SDL_SetRenderLogicalPresentation(renderer, lw, lh, mode);
 }
 

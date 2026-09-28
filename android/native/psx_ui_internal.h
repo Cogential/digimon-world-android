@@ -24,8 +24,12 @@ enum : uint16_t {
 enum TouchMode { TOUCH_AUTO = 0, TOUCH_ALWAYS = 1, TOUCH_OFF = 2 };
 
 /* The on-screen controls the player can move and resize one by one. */
-enum TouchEl { EL_DPAD, EL_FACE, EL_L1, EL_L2, EL_R1, EL_R2, EL_SELECT, EL_START,
-               EL_MENU, EL_FF, EL_COUNT };
+enum TouchEl { EL_DPAD, EL_TRIANGLE, EL_CIRCLE, EL_CROSS, EL_SQUARE, EL_L1, EL_L2,
+               EL_R1, EL_R2, EL_SELECT, EL_START, EL_MENU, EL_FF, EL_COUNT };
+
+/* How the game picture meets a screen wider than it: black side bars, a
+ * horizontal stretch, or a zoom that trims the top and bottom. */
+enum ScreenFit { FIT_BARS = 0, FIT_STRETCH = 1, FIT_ZOOM = 2 };
 
 /* Where the player put one control: an offset from its default spot, as a
  * fraction of the screen size, and a size relative to the overall size. */
@@ -39,6 +43,7 @@ struct CtlPlace {
  * mods in mods/state.toml. */
 struct UiSettings {
     int   touch_mode = TOUCH_AUTO;
+    int   screen_fit = FIT_STRETCH;
     float touch_opacity = 0.55f;
     float touch_scale = 1.0f;   /* overall size (1.0 = the default size) */
     CtlPlace ctl[EL_COUNT];

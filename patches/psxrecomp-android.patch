@@ -533,7 +533,7 @@ index 0fe0d27..4db4074 100644
      /* Let access violations reach the SEH filter with their faulting CONTEXT.
       * MinGW's SIGSEGV bridge discards EXCEPTION_POINTERS, reducing the report
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index e8e8328..b755ed7 100644
+index e8e8328..f1768fb 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -97,6 +97,12 @@ extern "C" void psx_game_codegen_forward_if_built(int argc, char** argv);
@@ -549,7 +549,20 @@ index e8e8328..b755ed7 100644
  #endif
  #include "psx_sdl_audio.h"
  #if defined(PSX_WEB)
-@@ -2523,6 +2529,19 @@ static std::filesystem::path default_memcard_dir(const char* argv0) {
+@@ -1642,6 +1648,12 @@ extern "C" void psx_ws_engage_aspect(int num, int den) {
+                  num, den);
+ }
+ 
++/* The last software present was a 4:3 frame (FMV, title, or a native-wide
++ * frame that could not present wide), pillarboxed inside the wide canvas. The
++ * UI overlay keeps those letterboxed when it otherwise fills the screen. */
++static int s_sw_present_43 = 0;
++extern "C" int psx_host_present_is_43(void) { return s_sw_present_43; }
++
+ static bool          g_gl_active = false;    /* GL context live -> GL present path */
+ static bool          g_vk_active = false;    /* Vulkan context live -> VK present path */
+ /* Present straight from the FBO (fast, no readback). Set PSX_GL_FORCE_CPU_PRESENT=1
+@@ -2523,6 +2535,19 @@ static std::filesystem::path default_memcard_dir(const char* argv0) {
  static void close_controller(void);
  static void shutdown_runtime(void);
  
@@ -569,7 +582,7 @@ index e8e8328..b755ed7 100644
  /* Set when this process started netplay from the lobby room — soft-exit returns
   * there instead of killing the process. */
  static int g_netplay_from_lobby = 0;
-@@ -2654,7 +2673,7 @@ static void netplay_soft_exit(const char *origin) {
+@@ -2654,7 +2679,7 @@ static void netplay_soft_exit(const char *origin) {
          return;
      }
      shutdown_runtime();
@@ -578,7 +591,7 @@ index e8e8328..b755ed7 100644
  }
  
  static void shutdown_runtime(void) {
-@@ -4591,6 +4610,10 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
+@@ -4591,6 +4616,10 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
          btn &= pad_from_keyboard(player);
      if (src.all_pads)
          btn &= dev_all_controllers_buttons(suppress_stick);
@@ -589,7 +602,7 @@ index e8e8328..b755ed7 100644
  
      /* Analog axes. Pinned-ANALOG folds the physical D-pad onto the left axes
       * (fold_dpad) so the D-pad still moves stick-only games; HYBRID feeds the
-@@ -5627,6 +5650,30 @@ static void savestate_menu_submit(int save) {
+@@ -5627,6 +5656,30 @@ static void savestate_menu_submit(int save) {
      }
  }
  
@@ -620,7 +633,7 @@ index e8e8328..b755ed7 100644
  static int savestate_menu_slot_from_key(SDL_Keycode key) {
      if (key >= SDLK_1 && key <= SDLK_9)
          return (int)(key - SDLK_1);
-@@ -5805,11 +5852,41 @@ static void rewind_pause_present(void) {
+@@ -5805,11 +5858,41 @@ static void rewind_pause_present(void) {
              SDL_RenderCopy(sdl_renderer, sdl_texture, &s_sw_hold_src,
                             &s_sw_hold_dst);
          host_osd_draw_sdl(sdl_renderer);
@@ -662,7 +675,7 @@ index e8e8328..b755ed7 100644
  /* Freeze guest in vblank present while the rewind filmstrip is open. */
  static void rewind_host_pause_loop(void) {
      while (psx_rewind_is_open()) {
-@@ -5818,7 +5895,7 @@ static void rewind_host_pause_loop(void) {
+@@ -5818,7 +5901,7 @@ static void rewind_host_pause_loop(void) {
              if (ev.type == SDL_QUIT) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
@@ -671,7 +684,7 @@ index e8e8328..b755ed7 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -5856,7 +5933,7 @@ static void savestate_menu_host_pause_loop(void) {
+@@ -5856,7 +5939,7 @@ static void savestate_menu_host_pause_loop(void) {
              if (ev.type == SDL_QUIT) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
@@ -680,7 +693,7 @@ index e8e8328..b755ed7 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6061,7 +6138,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6061,7 +6144,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  }
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
@@ -689,7 +702,7 @@ index e8e8328..b755ed7 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6155,6 +6232,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6155,6 +6238,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
              savestate_menu_host_pause_loop();
          if (psx_rewind_is_open())
              rewind_host_pause_loop();
@@ -700,7 +713,7 @@ index e8e8328..b755ed7 100644
      }
  
      /* Sample each player's device and feed the matching SIO pad slot.
-@@ -6313,8 +6394,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6313,8 +6400,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
       * Rollback resim: skip host audio pump (uncapped frames) so SPU/CD audio
       * paths cannot fork peers during the episode window. */
      if (!psx_netplay_is_resimulating() && !psx_selfcheck_resim_active()) {
@@ -718,7 +731,7 @@ index e8e8328..b755ed7 100644
      }
  #endif
  
-@@ -6375,6 +6464,32 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6375,6 +6470,32 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          }
      }
  
@@ -751,7 +764,7 @@ index e8e8328..b755ed7 100644
      /* Turbo-through-loads (step 4, OPT-IN via game.toml [runtime]
       * turbo_loads): while the game is loading — CD data stream active,
       * XA/FMV excluded, post-BIOS-handoff only — skip wall-clock pacing and
-@@ -6954,6 +7069,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6954,10 +7075,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      SDL_RenderClear(sdl_renderer);
      SDL_RenderCopy(sdl_renderer, sdl_texture, &src, &dst);
      host_osd_draw_sdl(sdl_renderer);
@@ -761,7 +774,12 @@ index e8e8328..b755ed7 100644
      /* §33: remember active rect for resim hold-last (not full 640x512). */
      s_sw_hold_src = src;
      s_sw_hold_dst = dst;
-@@ -10370,7 +10488,19 @@ namespace {
+     s_sw_hold_valid = 1;
++    s_sw_present_43 = pin_43 ? 1 : 0;
+ 
+     /* Vsync self-heal. PRESENTVSYNC is only armed when driver vsync owns
+      * cadence; the wall-clock pacer otherwise holds 59.94 Hz. Under some
+@@ -10370,7 +10495,19 @@ namespace {
  }  // namespace
  #endif
  
@@ -781,7 +799,7 @@ index e8e8328..b755ed7 100644
      /* Force line-buffered output so messages appear even if killed. */
      std::setvbuf(stdout, nullptr, _IOLBF, 0);
      std::setvbuf(stderr, nullptr, _IOLBF, 0);
-@@ -10391,6 +10521,22 @@ int main(int argc, char** argv) {
+@@ -10391,6 +10528,22 @@ int main(int argc, char** argv) {
      /* Install crash handlers early so they catch issues during init too.
       * Writes psx_last_run_report.json on signal/SEH/atexit/fail-fast. */
      psx_crash_trace_install_handlers();
@@ -804,7 +822,7 @@ index e8e8328..b755ed7 100644
  #if defined(RECOMP_LAUNCHER)
      launcher_boot_timing_mark("host:crash_handlers");
  #endif
-@@ -11019,6 +11165,32 @@ int main(int argc, char** argv) {
+@@ -11019,6 +11172,32 @@ int main(int argc, char** argv) {
  #if defined(RECOMP_LAUNCHER)
      launcher_boot_timing_mark("host:game_config_done");
  #endif
@@ -837,7 +855,7 @@ index e8e8328..b755ed7 100644
  
      if (!game_name.empty()) s_picker_game_name = game_name;
  
-@@ -12773,6 +12945,9 @@ session_reboot:
+@@ -12773,6 +12952,9 @@ session_reboot:
              return 1;
          }
      }
@@ -847,7 +865,7 @@ index e8e8328..b755ed7 100644
      load_input_config(argv[0]);
      /* The launcher / settings.toml / game.toml deadzone (when set) is the
       * user-facing authority; apply it over the input.ini value here, after
-@@ -12832,6 +13007,11 @@ session_reboot:
+@@ -12832,6 +13014,11 @@ session_reboot:
       * borderless desktop fullscreen (keeps the desktop resolution, letterboxes
       * the image), 2 = exclusive fullscreen (real display-mode change), 0 =
       * windowed. Matches the in-game Alt+Enter / Cmd+Ctrl+F hotkey behaviour. */
@@ -859,7 +877,7 @@ index e8e8328..b755ed7 100644
      win_flags |= psx_fullscreen_flag_for_mode(g_fullscreen);
      /* Open at the user-chosen window size (default 1280 wide) instead of the
       * old hardcoded 640x480, so the game doesn't boot into a tiny window. The
-@@ -13037,6 +13217,10 @@ session_reboot:
+@@ -13037,6 +13224,10 @@ session_reboot:
    }
      log_present_cadence();
    }
@@ -908,6 +926,21 @@ index 215f17f..62786b3 100644
  }
  
  void memcard_flush_all(void) {
+diff --git a/runtime/src/mod_builtin_widescreen.c b/runtime/src/mod_builtin_widescreen.c
+index 8785b7e..31b464c 100644
+--- a/runtime/src/mod_builtin_widescreen.c
++++ b/runtime/src/mod_builtin_widescreen.c
+@@ -36,6 +36,10 @@ static void builtin_widescreen_activate(void) {
+                              text, sizeof text)) {
+         if      (strcmp(text, "16:10") == 0) { num = 16; den = 10; }
+         else if (strcmp(text, "21:9")  == 0) { num = 21; den = 9;  }
++        /* The widest view a title's own widescreen code allows: 447:240
++         * (1.8625:1) is a 64 px reveal per side at 320 wide, Digimon World's
++         * DW_MARGIN_MAX. Phones wider than this fill the rest at present. */
++        else if (strcmp(text, "widest") == 0) { num = 447; den = 240; }
+         else if (strcmp(text, "4:3")   == 0) { num = 4;  den = 3;  }
+     }
+     psx_ws_engage_aspect(num, den);
 diff --git a/runtime/src/psx_android.cpp b/runtime/src/psx_android.cpp
 new file mode 100644
 index 0000000..0803c56

@@ -1,6 +1,6 @@
 # Mod choices, written by the in-game menu (Graphics, Enhancements, Cheats).
 # This default is installed on first launch only; app updates keep your file.
-# Android default: widescreen on at 16:9, everything else as shipped (off).
+# Android default: widescreen on at its widest (1.86:1), everything else as shipped (off).
 format_version = 2
 
 [[package]]
@@ -14,4 +14,4 @@ id = "widescreen"
 enabled = true
 
 [feature.values]
-aspect = "16:9"
+aspect = "widest"

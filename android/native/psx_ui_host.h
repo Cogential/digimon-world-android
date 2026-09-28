@@ -21,6 +21,7 @@ void     psx_host_set_texture_filter(int on);
 int      psx_host_screen_kind(void);                    /* 0 raw 1 crt 2 composite 3 trinitron */
 void     psx_host_set_screen_kind(int kind);
 int      psx_host_internal_scale(void);
+int      psx_host_present_is_43(void);  /* last frame was pillarboxed 4:3 (title, FMV) */
 uint64_t psx_host_frame_count(void);
 void     psx_host_input_guard(void);    /* swallow buttons still held when the menu closes */
 void     psx_host_shutdown(void);       /* flush saves etc. before the process goes away */

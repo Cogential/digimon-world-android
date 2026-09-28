@@ -16,15 +16,19 @@ each time the game starts.
 
 - Setup screen: pick your disc image (`.bin` of a `.bin/.cue` dump, or `.chd`).
   The program on it is checked against the version this port supports.
-- 16:9 / 16:10 widescreen (more view, nothing stretched), on by default.
+- Widescreen (more view, nothing stretched), on by default at its widest,
+  1.86:1: as far as the game's scenery reaches. Phones wider than that (most
+  are about 19.5:9) fill the rest by stretching the picture slightly or by
+  zooming, or keep black bars; the title screen and movies stay 4:3.
 - On-screen PlayStation controls that hide while you use a controller. Every
-  control can be moved and resized (Controls > Move and resize controls), and
-  reset to the default layout.
+  control, each face button included, can be moved and resized (Controls >
+  Move and resize controls), and reset to the default layout.
 - Bluetooth controllers (Xbox, PlayStation, ...), picked up at any time.
 - An in-game menu in the spirit of Ship of Harkinian, opened with the menu
   button, Android's back gesture, or Select+Start on a pad:
   - **Game**: 12 save-state slots, game speed 0.5x-4x, fast-forward, FPS counter
-  - **Graphics**: widescreen, internal resolution, filtering, colour model
+  - **Graphics**: widescreen aspect, fill screen, internal resolution,
+    filtering, colour model
   - **Audio**, **Controls**
   - **Enhancements**: the port's mods (trainer, longer life, training
     multiplier, lucky reels, guaranteed drops, 52 extra raisable Digimon, ...)
@@ -33,6 +37,17 @@ each time the game starts.
   - **Cheats**: 57 GameShark codes, toggled live
   - **Partner**: view and edit your Digimon's hidden stats, care values, age
     and lifespan, plus bits and merit
+
+## Installing
+
+Download `DigimonWorld-<version>.apk` from the
+[Releases](https://github.com/Cogential/digimon-world-android/releases) page
+and open it on your phone (allow installing from your browser or file manager
+when Android asks). The APK is for 64-bit ARM phones (Android 12 or newer).
+Updates install over the previous version and keep your saves and settings.
+
+On first launch, pick your disc image. Translating it takes a few seconds and
+happens once; after that the app goes straight to the game.
 
 ## Building
 

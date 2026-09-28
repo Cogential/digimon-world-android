@@ -275,22 +275,34 @@ void page_game() {
 
 void page_graphics() {
     heading("Widescreen");
-    int ws = 0;   /* 0 off, 1 16:9, 2 16:10 */
-    if (s_mods_ok && s_mods.feature_enabled(k_ws_pkg, k_ws_feat))
-        ws = s_mods.feature_option_value(k_ws_pkg, k_ws_feat, "aspect") == "16:10" ? 2 : 1;
-    static const int wsv[] = { 0, 1, 2 };
-    static const char *const wsl[] = { "Off (4:3)", "16:9", "16:10" };
+    int ws = 0;   /* 0 off, 1 16:9, 2 16:10, 3 widest */
+    if (s_mods_ok && s_mods.feature_enabled(k_ws_pkg, k_ws_feat)) {
+        const std::string a = s_mods.feature_option_value(k_ws_pkg, k_ws_feat, "aspect");
+        ws = a == "16:10" ? 2 : a == "widest" ? 3 : 1;
+    }
+    static const int wsv[] = { 0, 2, 1, 3 };
+    static const char *const wsl[] = { "Off (4:3)", "16:10", "16:9", "Widest" };
+    static const char *const wsval[] = { "", "16:9", "16:10", "widest" };
     row_label("Aspect ratio");
-    if (s_mods_ok && segmented("ws", &ws, wsv, wsl, 3)) {
+    if (s_mods_ok && segmented("ws", &ws, wsv, wsl, 4)) {
         s_mods.set_feature_enabled(k_ws_pkg, k_ws_feat, ws != 0);
-        if (ws) s_mods.set_feature_option(k_ws_pkg, k_ws_feat, "aspect", ws == 2 ? "16:10" : "16:9");
+        if (ws) s_mods.set_feature_option(k_ws_pkg, k_ws_feat, "aspect", wsval[ws]);
         save_mods();
         mark_restart();
     }
     note("Shows more of the world at the sides instead of stretching; menus keep "
-         "their shape. Rough edges: about a second of 4:3 after a battle, and a "
-         "few interiors end at the old screen edge.");
+         "their shape. Widest (1.86:1) is as far as the game's scenery reaches. "
+         "Rough edges: about a second of 4:3 after a battle, and a few interiors "
+         "end at the old screen edge.");
     restart_note(g_ui.restart_needed);
+
+    static const int fv[] = { FIT_BARS, FIT_STRETCH, FIT_ZOOM };
+    static const char *const fl[] = { "Black bars", "Stretch", "Zoom" };
+    row_label("Fill screen");
+    if (segmented("fit", &g_ui.s.screen_fit, fv, fl, 3)) ui_save_settings();
+    note("For screens wider than the picture: keep black bars at the sides, "
+         "stretch it sideways to fill (about 16% on a 19.5:9 phone with Widest), "
+         "or zoom in to fill, trimming a little off the top and bottom.");
 
     heading("Picture");
     int scale = s_us.has_supersampling ? s_us.supersampling : psx_host_internal_scale();
@@ -751,18 +763,39 @@ void ui_menu_draw() {
     ImGui::PopStyleColor();
     ImGui::Separator();
 
-    /* Sidebar */
+    /* Sidebar: every section fits, so it never scrolls. A section opens only
+     * on a tap (press and release on it without sliding); a finger dragged
+     * across the list neither highlights nor selects anything. */
     const float side_w = em() * 8.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f * g_ui.dpi));
-    ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
-    ImGui::BeginChild("##side", ImVec2(side_w, 0), ImGuiChildFlags_None);
-    touch_scroll();
-    for (int i = 0; i < SEC_COUNT; i++) {
-        if (ImGui::Selectable(k_section_names[i], s_section == i, 0, ImVec2(0, em() * 1.9f)))
-            s_section = (Section)i;
+    ImGui::BeginChild("##side", ImVec2(side_w, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    {
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        const ImGuiIO &io = ImGui::GetIO();
+        const float slop = 12.0f * g_ui.dpi;
+        const float row_h = em() * 1.9f;
+        for (int i = 0; i < SEC_COUNT; i++) {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const ImVec2 sz(ImGui::GetContentRegionAvail().x, row_h);
+            ImGui::PushID(i);
+            bool tapped = ImGui::InvisibleButton("##sec", sz);
+            /* A touch release counts only if the finger stayed put; controller
+             * activation has no mouse release and always counts. */
+            if (tapped && io.MouseReleased[0] &&
+                io.MouseDragMaxDistanceSqr[0] > slop * slop)
+                tapped = false;
+            if (tapped) s_section = (Section)i;
+            ImGui::PopID();
+            if (s_section == i)
+                dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y),
+                                  ImGui::GetColorU32(ImGuiCol_Header), ImGui::GetStyle().FrameRounding);
+            dl->AddText(ImVec2(p.x + ImGui::GetStyle().FramePadding.x, p.y + (row_h - em()) * 0.5f),
+                        ImGui::GetColorU32(ImGuiCol_Text), k_section_names[i]);
+        }
     }
     ImGui::EndChild();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar();
     ImGui::SameLine();
 
     /* Content */

@@ -108,6 +108,19 @@ cp "$RECOMP/psxrecomp/bios/SCPH1001.toml" "$PAYLOAD/bios/"    # recompiler's BIO
 cp "$RECOMP/seeds/ghidra_funcs.txt" "$PAYLOAD/seeds/"          # function entry seeds
 cp -r "$FIRST_BUILD/mods" "$PAYLOAD/mods"
 cp -r "$HERE/mods/." "$PAYLOAD/mods/packages/"                  # this port's own tweaks
+# Offer the game's widest safe widescreen: its plugins accept up to a 64 px
+# reveal per side (DW_MARGIN_MAX), which the runtime patch maps to "widest"
+# (447:240, 1.86:1). Added to the upstream manifest at build time.
+python3 - "$PAYLOAD/mods/packages/psx.enhancement.widescreen/1.0.0/manifest.toml" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+anchor = '[[option.choice]]\nvalue = "16:10"\nlabel = "16:10"\n'
+assert anchor in s, "widescreen manifest changed upstream"
+if 'value = "widest"' not in s:
+    s = s.replace(anchor, anchor + '\n[[option.choice]]\nvalue = "widest"\nlabel = "Widest (1.86:1)"\n')
+open(p, "w").write(s)
+PY
 cp "$HERE/mods.state.default.toml" "$PAYLOAD/mods/state.toml"   # installed once, then the player's
 cp -r "$FIRST_BUILD/tcc" "$PAYLOAD/tcc"                         # headers for the startup compile
 
