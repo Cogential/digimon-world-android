@@ -107,6 +107,7 @@ cp "$FIRST_BUILD/bios/openbios.bin" "$FIRST_BUILD/bios/OpenBIOS.LICENSE" "$PAYLO
 cp "$RECOMP/psxrecomp/bios/SCPH1001.toml" "$PAYLOAD/bios/"    # recompiler's BIOS profile
 cp "$RECOMP/seeds/ghidra_funcs.txt" "$PAYLOAD/seeds/"          # function entry seeds
 cp -r "$FIRST_BUILD/mods" "$PAYLOAD/mods"
+cp -r "$HERE/mods/." "$PAYLOAD/mods/packages/"                  # this port's own tweaks
 cp "$HERE/mods.state.default.toml" "$PAYLOAD/mods/state.toml"   # installed once, then the player's
 cp -r "$FIRST_BUILD/tcc" "$PAYLOAD/tcc"                         # headers for the startup compile
 

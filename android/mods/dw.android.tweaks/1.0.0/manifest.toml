@@ -1,0 +1,40 @@
+# Android port tweaks: small presentation fixes, each a guarded code patch
+# that is fully undone by turning the feature off.
+
+format_version = 5
+id = "dw.android.tweaks"
+version = "1.0.0"
+name = "Android Tweaks"
+author = "Digimon World for Android"
+description = "Presentation fixes for playing on a phone."
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "SLUS-01032"
+
+[[feature]]
+id = "no-window-outlines"
+name = "Hide Window Outlines"
+description = "When a text window opens or closes, the game draws it as a grey wireframe box that grows or shrinks for a few frames. On a sharp phone screen these flash up as stray rectangles (most noticeably after naming yourself). This skips the outlines; windows simply appear and disappear."
+group = "Display"
+default_enabled = true
+
+# The routine ending at 0x800C385C animates a window's rectangle between its closed and open
+# size and outlines it with two 3-point grey polylines (0x48, colour
+# 0x808080) through the LineF3 helper at 0x800E3D14. It draws nothing else
+# and returns nothing, so dropping the two calls removes only the outline.
+# jal 0x800E3D14 -> nop (the delay slots only set $a3).
+[[patch]]
+feature = "no-window-outlines"
+target = "main_exe"
+address = 0x800C380C
+expected = "45 8f 03 0c"
+replace = "00 00 00 00"
+
+[[patch]]
+feature = "no-window-outlines"
+target = "main_exe"
+address = 0x800C3838
+expected = "45 8f 03 0c"
+replace = "00 00 00 00"

@@ -23,13 +23,25 @@ enum : uint16_t {
 
 enum TouchMode { TOUCH_AUTO = 0, TOUCH_ALWAYS = 1, TOUCH_OFF = 2 };
 
+/* The on-screen controls the player can move and resize one by one. */
+enum TouchEl { EL_DPAD, EL_FACE, EL_L1, EL_L2, EL_R1, EL_R2, EL_SELECT, EL_START,
+               EL_MENU, EL_FF, EL_COUNT };
+
+/* Where the player put one control: an offset from its default spot, as a
+ * fraction of the screen size, and a size relative to the overall size. */
+struct CtlPlace {
+    float dx = 0.0f, dy = 0.0f;
+    float scale = 1.0f;
+};
+
 /* Player-facing overlay settings, kept in <data>/ui_settings.ini. Settings the
  * runtime owns (renderer, filtering, colour) live in its settings.toml, and
  * mods in mods/state.toml. */
 struct UiSettings {
     int   touch_mode = TOUCH_AUTO;
     float touch_opacity = 0.55f;
-    float touch_scale = 1.0f;
+    float touch_scale = 1.0f;   /* overall size (1.0 = the default size) */
+    CtlPlace ctl[EL_COUNT];
     float speed = 1.0f;       /* chosen speed; fast-forward overrides it */
     float ff_speed = 3.0f;    /* speed while fast-forward is toggled on */
     bool  show_fps = false;
@@ -43,11 +55,13 @@ struct UiState {
     UiSettings    s;
     bool          ready = false;
     bool          menu_open = false;
+    bool          layout_edit = false;  /* moving/resizing the touch controls */
     bool          ff_active = false;
     float         dpi = 1.0f;           /* display density (1.0 = 160 dpi) */
     int           width = 0, height = 0; /* output size in pixels */
     ImFont       *font = nullptr;
     ImFont       *font_big = nullptr;
+    ImFont       *font_small = nullptr;   /* notes under settings */
     double        fps = 0.0;
     bool          restart_needed = false; /* a setting that applies at boot changed */
 };
@@ -56,6 +70,8 @@ extern UiState g_ui;
 
 void ui_save_settings();
 void ui_set_menu_open(bool open);
+void ui_begin_layout_edit();     /* leave the menu for the touch layout editor */
+void ui_reset_touch_layout();    /* default size and place for every control */
 void ui_menu_draw();            /* psx_ui_menu.cpp */
 void ui_menu_on_open();         /* psx_ui_menu.cpp: refresh cached state */
 

@@ -17,7 +17,9 @@ each time the game starts.
 - Setup screen: pick your disc image (`.bin` of a `.bin/.cue` dump, or `.chd`).
   The program on it is checked against the version this port supports.
 - 16:9 / 16:10 widescreen (more view, nothing stretched), on by default.
-- On-screen PlayStation controls that hide while you use a controller.
+- On-screen PlayStation controls that hide while you use a controller. Every
+  control can be moved and resized (Controls > Move and resize controls), and
+  reset to the default layout.
 - Bluetooth controllers (Xbox, PlayStation, ...), picked up at any time.
 - An in-game menu in the spirit of Ship of Harkinian, opened with the menu
   button, Android's back gesture, or Select+Start on a pad:
@@ -26,6 +28,8 @@ each time the game starts.
   - **Audio**, **Controls**
   - **Enhancements**: the port's mods (trainer, longer life, training
     multiplier, lucky reels, guaranteed drops, 52 extra raisable Digimon, ...)
+    plus this port's own: Hide Window Outlines (on by default), which skips
+    the grey wireframe boxes the game flashes when a text window opens or closes
   - **Cheats**: 57 GameShark codes, toggled live
   - **Partner**: view and edit your Digimon's hidden stats, care values, age
     and lifespan, plus bits and merit
@@ -55,6 +59,7 @@ updates must be signed with the same key to install over an existing copy.
 | Menu and touch controls (Dear ImGui over SDL3) | `android/native/` |
 | Android platform layer, dynamic game loading, in-app translation | `patches/psxrecomp-android.patch` |
 | TinyCC: resolve host symbols in `-nostdlib` memory compiles | `patches/tinycc-resolve-host-symbols.patch` |
+| This port's mod package (guarded code patches) | `android/mods/` |
 
 The psxrecomp patch adds:
 

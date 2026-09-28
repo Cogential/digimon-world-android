@@ -32,6 +32,13 @@ namespace {
 
 /* ---- settings file -------------------------------------------------------- */
 
+const char *const k_el_keys[EL_COUNT] = {
+    "dpad", "face", "l1", "l2", "r1", "r2", "select", "start", "menu", "ff" };
+const char *const k_el_names[EL_COUNT] = {
+    "D-pad", "Face buttons", "L1", "L2", "R1", "R2", "Select", "Start",
+    "Menu button", "Fast-forward button" };
+constexpr float k_el_min_scale = 0.5f, k_el_max_scale = 2.5f;
+
 std::string settings_path() { return g_ui.data_dir + "/ui_settings.ini"; }
 
 void load_settings() {
@@ -51,6 +58,17 @@ void load_settings() {
         else if (k == "ff_speed") s.ff_speed = std::clamp((float)std::atof(val), 1.5f, 8.0f);
         else if (k == "show_fps") s.show_fps = std::atoi(val) != 0;
         else if (k == "volume") s.volume = std::clamp(std::atoi(val), 0, 100);
+        else if (k.rfind("ctl_", 0) == 0) {
+            for (int e = 0; e < EL_COUNT; e++) {
+                if (k.compare(4, std::string::npos, k_el_keys[e]) != 0) continue;
+                float dx = 0, dy = 0, sc = 1;
+                if (std::sscanf(val, "%f,%f,%f", &dx, &dy, &sc) == 3) {
+                    s.ctl[e].dx = std::clamp(dx, -1.0f, 1.0f);
+                    s.ctl[e].dy = std::clamp(dy, -1.0f, 1.0f);
+                    s.ctl[e].scale = std::clamp(sc, k_el_min_scale, k_el_max_scale);
+                }
+            }
+        }
     }
     std::fclose(f);
 }
@@ -92,6 +110,7 @@ enum CtlKind { CTL_NONE, CTL_DPAD, CTL_BUTTON, CTL_MENU, CTL_FF };
 enum Shape { SH_TRIANGLE, SH_CIRCLE, SH_CROSS, SH_SQUARE, SH_PILL, SH_SHOULDER, SH_ICON };
 
 struct TouchButton {
+    int el;         /* TouchEl it belongs to */
     uint16_t bit;
     CtlKind kind;
     Shape shape;
@@ -124,38 +143,72 @@ uint64_t s_last_touch_ms = 0, s_last_pad_ms = 0;
 bool s_chord_down = false;          /* Select+Start held on a pad */
 bool s_r3_down = false;
 
+/* Every control sits at a default spot (worked out from the screen size),
+ * moved and resized by the player's layout. 1.0 in the size settings is this
+ * default, which is 15% larger than the first release's. */
+constexpr float k_base_size = 1.15f;
+ImVec2 s_el_home[EL_COUNT];               /* default centre */
+ImVec2 s_el_c[EL_COUNT];                  /* centre after the player's layout */
+ImVec2 s_el_half[EL_COUNT];               /* half extents, for the editor */
+
+float layout_unit() {
+    return (float)g_ui.height / 100.0f * k_base_size * g_ui.s.touch_scale;
+}
+
+ImVec2 place(int el, ImVec2 home, ImVec2 half) {
+    const float W = (float)g_ui.width, H = (float)g_ui.height;
+    const CtlPlace &p = g_ui.s.ctl[el];
+    s_el_home[el] = home;
+    ImVec2 c(home.x + p.dx * W, home.y + p.dy * H);
+    c.x = std::clamp(c.x, 0.0f, W);
+    c.y = std::clamp(c.y, 0.0f, H);
+    s_el_c[el] = c;
+    s_el_half[el] = ImVec2(half.x * p.scale, half.y * p.scale);
+    return c;
+}
+
 void layout_touch() {
     const float W = (float)g_ui.width, H = (float)g_ui.height;
-    const float u = H / 100.0f * g_ui.s.touch_scale;   /* layout unit */
+    const float u = layout_unit();
+    auto sc = [](int el) { return g_ui.s.ctl[el].scale; };
     s_buttons.clear();
 
-    s_dpad_r = 15.0f * u;
-    s_dpad_c = ImVec2(6.0f * u + s_dpad_r, H - 8.0f * u - s_dpad_r);
+    const float dr = 15.0f * u;
+    s_dpad_c = place(EL_DPAD, ImVec2(6.0f * u + dr, H - 8.0f * u - dr), ImVec2(dr * 1.1f, dr * 1.1f));
+    s_dpad_r = dr * sc(EL_DPAD);
 
-    const ImVec2 face(W - 6.0f * u - 17.0f * u, H - 8.0f * u - 17.0f * u);
-    const float d = 10.5f * u, r = 6.2f * u;
-    s_buttons.push_back({PADB_TRIANGLE, CTL_BUTTON, SH_TRIANGLE, ImVec2(face.x, face.y - d), ImVec2(r, r), nullptr});
-    s_buttons.push_back({PADB_CIRCLE, CTL_BUTTON, SH_CIRCLE, ImVec2(face.x + d, face.y), ImVec2(r, r), nullptr});
-    s_buttons.push_back({PADB_CROSS, CTL_BUTTON, SH_CROSS, ImVec2(face.x, face.y + d), ImVec2(r, r), nullptr});
-    s_buttons.push_back({PADB_SQUARE, CTL_BUTTON, SH_SQUARE, ImVec2(face.x - d, face.y), ImVec2(r, r), nullptr});
+    {
+        const float d0 = 10.5f * u, r0 = 6.2f * u;
+        const ImVec2 f = place(EL_FACE, ImVec2(W - 6.0f * u - 17.0f * u, H - 8.0f * u - 17.0f * u),
+                               ImVec2(d0 + r0, d0 + r0));
+        const float d = d0 * sc(EL_FACE), r = r0 * sc(EL_FACE);
+        s_buttons.push_back({EL_FACE, PADB_TRIANGLE, CTL_BUTTON, SH_TRIANGLE, ImVec2(f.x, f.y - d), ImVec2(r, r), nullptr});
+        s_buttons.push_back({EL_FACE, PADB_CIRCLE, CTL_BUTTON, SH_CIRCLE, ImVec2(f.x + d, f.y), ImVec2(r, r), nullptr});
+        s_buttons.push_back({EL_FACE, PADB_CROSS, CTL_BUTTON, SH_CROSS, ImVec2(f.x, f.y + d), ImVec2(r, r), nullptr});
+        s_buttons.push_back({EL_FACE, PADB_SQUARE, CTL_BUTTON, SH_SQUARE, ImVec2(f.x - d, f.y), ImVec2(r, r), nullptr});
+    }
 
-    const ImVec2 sh(10.0f * u, 4.2f * u);
-    s_buttons.push_back({PADB_L2, CTL_BUTTON, SH_SHOULDER, ImVec2(6.0f * u + sh.x, 5.0f * u + sh.y), sh, "L2"});
-    s_buttons.push_back({PADB_L1, CTL_BUTTON, SH_SHOULDER, ImVec2(6.0f * u + sh.x, 15.5f * u + sh.y), sh, "L1"});
-    s_buttons.push_back({PADB_R2, CTL_BUTTON, SH_SHOULDER, ImVec2(W - 6.0f * u - sh.x, 5.0f * u + sh.y), sh, "R2"});
-    s_buttons.push_back({PADB_R1, CTL_BUTTON, SH_SHOULDER, ImVec2(W - 6.0f * u - sh.x, 15.5f * u + sh.y), sh, "R1"});
-
-    const ImVec2 pill(6.5f * u, 2.8f * u);
-    s_buttons.push_back({PADB_SELECT, CTL_BUTTON, SH_PILL, ImVec2(W * 0.5f - 9.0f * u, H - 5.0f * u), pill, "SELECT"});
-    s_buttons.push_back({PADB_START, CTL_BUTTON, SH_PILL, ImVec2(W * 0.5f + 9.0f * u, H - 5.0f * u), pill, "START"});
-
+    struct Simple { int el; uint16_t bit; CtlKind kind; Shape shape; ImVec2 home, half; const char *label; };
+    const ImVec2 sh(10.0f * u, 4.2f * u), pill(6.5f * u, 2.8f * u);
     const float ir = 4.2f * u;
-    s_buttons.push_back({0, CTL_MENU, SH_ICON, ImVec2(W * 0.5f - 6.0f * u, 5.5f * u), ImVec2(ir, ir), "menu"});
-    s_buttons.push_back({0, CTL_FF, SH_ICON, ImVec2(W * 0.5f + 6.0f * u, 5.5f * u), ImVec2(ir, ir), "ff"});
+    const Simple simple[] = {
+        {EL_L2, PADB_L2, CTL_BUTTON, SH_SHOULDER, ImVec2(6.0f * u + sh.x, 5.0f * u + sh.y), sh, "L2"},
+        {EL_L1, PADB_L1, CTL_BUTTON, SH_SHOULDER, ImVec2(6.0f * u + sh.x, 15.5f * u + sh.y), sh, "L1"},
+        {EL_R2, PADB_R2, CTL_BUTTON, SH_SHOULDER, ImVec2(W - 6.0f * u - sh.x, 5.0f * u + sh.y), sh, "R2"},
+        {EL_R1, PADB_R1, CTL_BUTTON, SH_SHOULDER, ImVec2(W - 6.0f * u - sh.x, 15.5f * u + sh.y), sh, "R1"},
+        {EL_SELECT, PADB_SELECT, CTL_BUTTON, SH_PILL, ImVec2(W * 0.5f - 9.0f * u, H - 5.0f * u), pill, "SELECT"},
+        {EL_START, PADB_START, CTL_BUTTON, SH_PILL, ImVec2(W * 0.5f + 9.0f * u, H - 5.0f * u), pill, "START"},
+        {EL_MENU, 0, CTL_MENU, SH_ICON, ImVec2(W * 0.5f - 6.0f * u, 5.5f * u), ImVec2(ir, ir), "menu"},
+        {EL_FF, 0, CTL_FF, SH_ICON, ImVec2(W * 0.5f + 6.0f * u, 5.5f * u), ImVec2(ir, ir), "ff"},
+    };
+    for (const Simple &b : simple) {
+        const ImVec2 c = place(b.el, b.home, b.half);
+        s_buttons.push_back({b.el, b.bit, b.kind, b.shape, c, s_el_half[b.el], b.label});
+    }
 }
 
 bool touch_visible() {
-    if (g_ui.menu_open) return false;
+    if (g_ui.menu_open || g_ui.layout_edit) return false;
     switch (g_ui.s.touch_mode) {
     case TOUCH_ALWAYS: return true;
     case TOUCH_OFF: return false;
@@ -287,17 +340,19 @@ void poll_gamepads() {
     }
     SDL_free(ids);
     if (any) s_last_pad_ms = SDL_GetTicks();
-    if (chord && !s_chord_down) ui_set_menu_open(!g_ui.menu_open);
+    if (chord && !s_chord_down && !g_ui.layout_edit) ui_set_menu_open(!g_ui.menu_open);
     s_chord_down = chord;
-    if (r3 && !s_r3_down && !g_ui.menu_open) {
+    if (r3 && !s_r3_down && !g_ui.menu_open && !g_ui.layout_edit) {
         g_ui.ff_active = !g_ui.ff_active;
         host_osd_push(g_ui.ff_active ? "Fast forward on" : "Fast forward off", 900);
     }
     s_r3_down = r3;
 }
 
-/* Consume queued events: to ImGui while the menu is open, to the touch
- * controls otherwise. */
+void end_layout_edit(bool keep);
+
+/* Consume queued events: to ImGui while the menu or the layout editor is
+ * open, to the touch controls otherwise. */
 void pump_events() {
     std::vector<SDL_Event> events;
     {
@@ -306,11 +361,13 @@ void pump_events() {
     }
     for (const SDL_Event &ev : events) {
         if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_AC_BACK) {
-            if (!ev.key.repeat) ui_set_menu_open(!g_ui.menu_open);
+            if (ev.key.repeat) continue;
+            if (g_ui.layout_edit) end_layout_edit(true);
+            else ui_set_menu_open(!g_ui.menu_open);
             continue;
         }
         if (ev.type == SDL_EVENT_KEY_UP && ev.key.key == SDLK_AC_BACK) continue;
-        if (g_ui.menu_open) {
+        if (g_ui.menu_open || g_ui.layout_edit) {
             /* Touch reaches ImGui as SDL's synthesized mouse events. */
             if (ev.type != SDL_EVENT_FINGER_DOWN && ev.type != SDL_EVENT_FINGER_UP &&
                 ev.type != SDL_EVENT_FINGER_MOTION && ev.type != SDL_EVENT_FINGER_CANCELED)
@@ -338,7 +395,7 @@ ImU32 col(int r, int g, int b, float a) {
 
 void draw_touch(ImDrawList *dl) {
     const float a = g_ui.s.touch_opacity;
-    const float u = (float)g_ui.height / 100.0f * g_ui.s.touch_scale;
+    const float u = layout_unit();
     const float line = std::max(2.0f, 0.45f * u);
 
     /* D-pad: a cross with the pressed arms lit. */
@@ -419,6 +476,138 @@ void draw_touch(ImDrawList *dl) {
     }
 }
 
+/* ---- layout editor ------------------------------------------------------------------ */
+
+/* The game stays paused while the player drags controls around. A tap selects
+ * the control under the finger; dragging moves it; the panel in the middle
+ * resizes the selected one, and can reset or undo everything. */
+UiSettings s_edit_backup;
+int s_edit_sel = -1;
+bool s_edit_drag = false;
+ImVec2 s_edit_grab;
+
+int el_at(ImVec2 p) {
+    int best = -1;
+    float best_d = 1e30f;
+    for (int e = 0; e < EL_COUNT; e++) {
+        const ImVec2 c = s_el_c[e], h = s_el_half[e];
+        const float slack = 1.2f;
+        if (std::fabs(p.x - c.x) > h.x * slack || std::fabs(p.y - c.y) > h.y * slack) continue;
+        const float d = (p.x - c.x) * (p.x - c.x) + (p.y - c.y) * (p.y - c.y);
+        if (d < best_d) { best = e; best_d = d; }
+    }
+    return best;
+}
+
+void end_layout_edit(bool keep) {
+    if (!keep) g_ui.s = s_edit_backup;
+    g_ui.layout_edit = false;
+    s_edit_drag = false;
+    ui_save_settings();
+    layout_touch();
+    ui_set_menu_open(true);     /* back to the Controls page */
+}
+
+void layout_editor() {
+    ImGuiIO &io = ImGui::GetIO();
+    const float W = (float)g_ui.width, H = (float)g_ui.height;
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), IM_COL32(0, 0, 0, 90));
+
+    /* Drag first, so what is drawn this frame is where the finger is. */
+    const bool over_panel = ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) || ImGui::IsAnyItemActive();
+    if (ImGui::IsMouseClicked(0) && !over_panel) {
+        s_edit_sel = el_at(io.MousePos);
+        s_edit_drag = s_edit_sel >= 0;
+        if (s_edit_drag)
+            s_edit_grab = ImVec2(io.MousePos.x - s_el_c[s_edit_sel].x, io.MousePos.y - s_el_c[s_edit_sel].y);
+    }
+    if (s_edit_drag && io.MouseDown[0]) {
+        const int e = s_edit_sel;
+        const float cx = std::clamp(io.MousePos.x - s_edit_grab.x, 0.0f, W);
+        const float cy = std::clamp(io.MousePos.y - s_edit_grab.y, 0.0f, H);
+        g_ui.s.ctl[e].dx = (cx - s_el_home[e].x) / W;
+        g_ui.s.ctl[e].dy = (cy - s_el_home[e].y) / H;
+        layout_touch();
+    }
+    if (!io.MouseDown[0]) s_edit_drag = false;
+
+    const float saved_opacity = g_ui.s.touch_opacity;
+    g_ui.s.touch_opacity = std::max(saved_opacity, 0.8f);
+    s_touch_bits = 0;
+    draw_touch(dl);
+    g_ui.s.touch_opacity = saved_opacity;
+    for (int e = 0; e < EL_COUNT; e++) {
+        const ImVec2 c = s_el_c[e], h = s_el_half[e];
+        const bool sel = e == s_edit_sel;
+        dl->AddRect(ImVec2(c.x - h.x, c.y - h.y), ImVec2(c.x + h.x, c.y + h.y),
+                    sel ? IM_COL32(255, 204, 64, 255) : IM_COL32(255, 255, 255, 70),
+                    6.0f * g_ui.dpi, 0, (sel ? 3.0f : 1.5f) * g_ui.dpi);
+    }
+
+    /* The panel hides while a control is dragged, and steps aside from the
+     * picked control so it never covers it. */
+    if (s_edit_drag) return;
+    float panel_y = H * 0.5f;
+    if (s_edit_sel >= 0) {
+        const ImVec2 c = s_el_c[s_edit_sel];
+        if (std::fabs(c.x - W * 0.5f) < W * 0.3f && std::fabs(c.y - H * 0.5f) < H * 0.3f)
+            panel_y = c.y < H * 0.5f ? H * 0.78f : H * 0.22f;
+    }
+    ImGui::SetNextWindowPos(ImVec2(W * 0.5f, panel_y), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 17.0f, 0), ImVec2(W * 0.5f, H));
+    ImGui::Begin("##layout", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    const float em = ImGui::GetFontSize();
+    ImGui::TextUnformatted("Customize touch controls");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.66f, 0.76f, 1.0f));
+    ImGui::TextWrapped("Drag a control to move it. Tap one to pick it, then set its size here.");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("All controls");
+    ImGui::SameLine(em * 7.0f);
+    ImGui::SetNextItemWidth(-1);
+    int all = (int)std::lround(g_ui.s.touch_scale * 100.0f);
+    if (ImGui::SliderInt("##all", &all, 60, 160, "%d%%")) {
+        g_ui.s.touch_scale = all / 100.0f;
+        layout_touch();
+    }
+
+    if (s_edit_sel >= 0) {
+        CtlPlace &p = g_ui.s.ctl[s_edit_sel];
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(k_el_names[s_edit_sel]);
+        ImGui::SameLine(em * 7.0f);
+        ImGui::SetNextItemWidth(-1);
+        int pct = (int)std::lround(p.scale * 100.0f);
+        if (ImGui::SliderInt("##one", &pct, (int)(k_el_min_scale * 100), (int)(k_el_max_scale * 100), "%d%%")) {
+            p.scale = pct / 100.0f;
+            layout_touch();
+        }
+        if (ImGui::Button("Reset this control")) {
+            p = CtlPlace();
+            layout_touch();
+        }
+    } else {
+        ImGui::TextDisabled("No control picked");
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Reset all")) {
+        ui_reset_touch_layout();
+        s_edit_sel = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) end_layout_edit(false);
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.24f, 1.0f));
+    if (ImGui::Button("Done", ImVec2(em * 5.0f, 0))) end_layout_edit(true);
+    ImGui::PopStyleColor();
+    ImGui::End();
+}
+
 void draw_fps(ImDrawList *dl) {
     static uint64_t last_ms = 0, last_frame = 0;
     const uint64_t now = SDL_GetTicks(), frame = psx_host_frame_count();
@@ -447,10 +636,12 @@ void setup_style() {
     st.PopupRounding = 8.0f;
     st.ScrollbarRounding = 8.0f;
     st.TabRounding = 7.0f;
-    st.FramePadding = ImVec2(12, 9);
-    st.ItemSpacing = ImVec2(12, 10);
-    st.ItemInnerSpacing = ImVec2(10, 8);
-    st.WindowPadding = ImVec2(16, 14);
+    st.FramePadding = ImVec2(10, 7);
+    st.ItemSpacing = ImVec2(10, 6);
+    st.ItemInnerSpacing = ImVec2(7, 6);
+    st.WindowPadding = ImVec2(12, 10);
+    st.CellPadding = ImVec2(8, 3);
+    st.IndentSpacing = 16.0f;
     st.GrabMinSize = 22.0f;
     st.ScrollbarSize = 18.0f;
     ImVec4 *c = st.Colors;
@@ -474,7 +665,7 @@ void setup_style() {
 
 void load_fonts() {
     ImGuiIO &io = ImGui::GetIO();
-    const float px = std::round(17.0f * g_ui.dpi);
+    const float px = std::round(15.5f * g_ui.dpi);
     static const char *const k_fonts[] = {
         "/system/fonts/Roboto-Regular.ttf", "/system/fonts/RobotoStatic-Regular.ttf",
         "/system/fonts/NotoSans-Regular.ttf", "/system/fonts/DroidSans.ttf",
@@ -485,14 +676,17 @@ void load_fonts() {
         if (!f) continue;
         std::fclose(f);
         g_ui.font = io.Fonts->AddFontFromFileTTF(path, px);
-        g_ui.font_big = io.Fonts->AddFontFromFileTTF(path, std::round(px * 1.35f));
-        if (g_ui.font && g_ui.font_big) return;
+        g_ui.font_big = io.Fonts->AddFontFromFileTTF(path, std::round(px * 1.3f));
+        g_ui.font_small = io.Fonts->AddFontFromFileTTF(path, std::round(px * 0.82f));
+        if (g_ui.font && g_ui.font_big && g_ui.font_small) return;
     }
     ImFontConfig cfg;
     cfg.SizePixels = px;
     g_ui.font = io.Fonts->AddFontDefault(&cfg);
-    cfg.SizePixels = std::round(px * 1.35f);
+    cfg.SizePixels = std::round(px * 1.3f);
     g_ui.font_big = io.Fonts->AddFontDefault(&cfg);
+    cfg.SizePixels = std::round(px * 0.82f);
+    g_ui.font_small = io.Fonts->AddFontDefault(&cfg);
 }
 
 }  // namespace
@@ -507,6 +701,8 @@ void ui_save_settings() {
                     "ff_speed=%.2f\nshow_fps=%d\nvolume=%d\n",
                  s.touch_mode, s.touch_opacity, s.touch_scale, s.speed, s.ff_speed,
                  s.show_fps ? 1 : 0, s.volume);
+    for (int e = 0; e < EL_COUNT; e++)
+        std::fprintf(f, "ctl_%s=%.4f,%.4f,%.3f\n", k_el_keys[e], s.ctl[e].dx, s.ctl[e].dy, s.ctl[e].scale);
     std::fclose(f);
 }
 
@@ -520,6 +716,21 @@ void ui_set_menu_open(bool open) {
         /* Buttons still held from closing the menu must not reach the game. */
         psx_host_input_guard();
     }
+}
+
+void ui_begin_layout_edit() {
+    s_edit_backup = g_ui.s;
+    s_edit_sel = -1;
+    s_edit_drag = false;
+    g_ui.menu_open = false;     /* the game stays paused: see psx_ui_menu_open */
+    release_all_fingers();
+    g_ui.layout_edit = true;
+}
+
+void ui_reset_touch_layout() {
+    g_ui.s.touch_scale = 1.0f;
+    for (CtlPlace &p : g_ui.s.ctl) p = CtlPlace();
+    layout_touch();
 }
 
 /* ---- C API ---------------------------------------------------------------------------- */
@@ -577,8 +788,9 @@ extern "C" void psx_ui_render(SDL_Renderer *renderer) {
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     ImGui::NewFrame();
     ImDrawList *dl = ImGui::GetForegroundDrawList();
-    if (touch_visible()) draw_touch(dl);
-    if (g_ui.s.show_fps && !g_ui.menu_open) draw_fps(dl);
+    if (g_ui.layout_edit) layout_editor();
+    else if (touch_visible()) draw_touch(dl);
+    if (g_ui.s.show_fps && !g_ui.menu_open && !g_ui.layout_edit) draw_fps(dl);
     if (g_ui.menu_open) ui_menu_draw();
     ImGui::Render();
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
@@ -586,10 +798,11 @@ extern "C" void psx_ui_render(SDL_Renderer *renderer) {
     SDL_SetRenderLogicalPresentation(renderer, lw, lh, mode);
 }
 
-extern "C" int psx_ui_menu_open(void) { return g_ui.menu_open ? 1 : 0; }
+/* The layout editor pauses the game like the menu does. */
+extern "C" int psx_ui_menu_open(void) { return g_ui.menu_open || g_ui.layout_edit ? 1 : 0; }
 
 extern "C" uint16_t psx_ui_pad_buttons(void) {
-    if (g_ui.ready && !g_ui.menu_open) {
+    if (g_ui.ready && !g_ui.menu_open && !g_ui.layout_edit) {
         /* The game samples its pad before the frame is drawn, so take any
          * touches that arrived since the last frame now. */
         pump_events();

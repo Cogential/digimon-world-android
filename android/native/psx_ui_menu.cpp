@@ -16,6 +16,7 @@
  * effect immediately.
  */
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -74,22 +75,73 @@ void mark_restart() { g_ui.restart_needed = true; }
 
 float em() { return ImGui::GetFontSize(); }
 
+/* Explanations are set smaller and dimmer than the settings they explain. */
 void note(const char *text) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.66f, 0.76f, 1.0f));
+    ImGui::PushFont(g_ui.font_small);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.64f, 0.74f, 1.0f));
     ImGui::TextWrapped("%s", text);
     ImGui::PopStyleColor();
+    ImGui::PopFont();
 }
 
 void heading(const char *text) {
-    ImGui::Spacing();
-    ImGui::PushFont(g_ui.font_big);
+    ImGui::Dummy(ImVec2(0, em() * 0.2f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.80f, 0.36f, 1.0f));
     ImGui::TextUnformatted(text);
-    ImGui::PopFont();
+    ImGui::PopStyleColor();
     ImGui::Separator();
 }
 
 void track_slider() {
     if (ImGui::IsItemActive()) s_slider_active = true;
+}
+
+/* A label in a fixed-width column, with its control to the right of it. */
+constexpr float k_label_em = 8.5f;
+void row_label(const char *text) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(text);
+    ImGui::SameLine(em() * k_label_em);
+}
+
+/* Small text on a line of buttons, centred on them. */
+void small_text_on_frame_line(const char *text, bool dim) {
+    ImFont *f = g_ui.font_small;
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const ImVec2 sz = f->CalcTextSizeA(f->FontSize, FLT_MAX, 0.0f, text);
+    const float h = ImGui::GetFrameHeight();
+    ImGui::GetWindowDrawList()->AddText(f, f->FontSize, ImVec2(pos.x, pos.y + (h - sz.y) * 0.5f),
+                                        ImGui::GetColorU32(dim ? ImGuiCol_TextDisabled : ImGuiCol_Text), text);
+    ImGui::Dummy(ImVec2(sz.x, h));
+}
+
+/* How many columns of at least min_em fit in the space left. */
+int grid_cols(float min_em, int max_cols = 4) {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    return std::clamp((int)(avail / (min_em * em())), 1, max_cols);
+}
+
+bool begin_grid(const char *id, int cols) {
+    return ImGui::BeginTable(id, cols, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings);
+}
+
+/* A checkbox whose label wraps inside its column instead of running off. */
+bool wrapped_checkbox(const char *label, bool *v) {
+    ImGui::PushID(label);
+    bool changed = ImGui::Checkbox("##cb", v);
+    ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextWrapped("%s", label);
+    /* Toggle on release, and only for a tap: a drag that starts on the label
+     * is the player scrolling the page. */
+    const float slop = 12.0f * g_ui.dpi;
+    if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(0) &&
+        ImGui::GetIO().MouseDragMaxDistanceSqr[0] < slop * slop) {
+        *v = !*v;
+        changed = true;
+    }
+    ImGui::PopID();
+    return changed;
 }
 
 /* A row of mutually exclusive buttons. Returns true when the value changed. */
@@ -98,7 +150,7 @@ bool segmented(const char *id, T *value, const T *values, const char *const *lab
     bool changed = false;
     ImGui::PushID(id);
     for (int i = 0; i < n; i++) {
-        if (i) ImGui::SameLine();
+        if (i) ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
         const bool on = *value == values[i];
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
         if (ImGui::Button(labels[i], ImVec2(0, 0)) && !on) {
@@ -113,163 +165,187 @@ bool segmented(const char *id, T *value, const T *values, const char *const *lab
 
 bool restart_note(bool pending) {
     if (!pending) return false;
+    ImGui::PushFont(g_ui.font_small);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-    ImGui::TextWrapped("Takes effect the next time the game starts.");
+    ImGui::TextWrapped("Takes effect the next time the game starts (Game > Restart now).");
     ImGui::PopStyleColor();
+    ImGui::PopFont();
     return true;
 }
 
-/* Touch-drag scrolling for the content pane: a vertical drag that does not
- * start on a slider scrolls instead of pressing whatever was under the
- * finger. */
+/* Touch-drag scrolling, for the sidebar and the content pane alike: a
+ * vertical drag that does not start on a slider scrolls the window instead of
+ * pressing whatever was under the finger. Called inside the child window. */
 void touch_scroll() {
+    struct Drag { ImGuiID id = 0; bool dragging = false; float press_y = 0.0f; };
+    static Drag drags[4];
     ImGuiIO &io = ImGui::GetIO();
-    static bool dragging = false;
-    static float press_y = 0.0f;
-    if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
-                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
-        if (!io.MouseDown[0]) dragging = false;
-        return;
+    const ImGuiID id = ImGui::GetCurrentWindow()->ID;
+    Drag *d = nullptr;
+    for (Drag &x : drags) if (x.id == id) { d = &x; break; }
+    if (!d) for (Drag &x : drags) if (x.id == 0) { d = &x; d->id = id; break; }
+    if (!d) return;
+    if (!io.MouseDown[0]) {
+        d->dragging = false;
+        d->press_y = -1.0f;
     }
-    if (ImGui::IsMouseClicked(0)) {
-        press_y = io.MousePos.y;
-        dragging = false;
+    const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (hovered && ImGui::IsMouseClicked(0)) {
+        d->press_y = io.MousePos.y;
+        d->dragging = false;
     }
-    if (io.MouseDown[0] && !s_slider_active_last) {
-        if (!dragging && std::fabs(io.MousePos.y - press_y) > 12.0f * g_ui.dpi) {
-            dragging = true;
-            ImGui::ClearActiveID();
-        }
-        if (dragging) ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+    if (!io.MouseDown[0] || d->press_y < 0.0f || s_slider_active_last) return;
+    if (!d->dragging && std::fabs(io.MousePos.y - d->press_y) > 12.0f * g_ui.dpi) {
+        d->dragging = true;
+        ImGui::ClearActiveID();
     }
-    if (!io.MouseDown[0]) dragging = false;
+    if (d->dragging) ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
 }
 
 /* ---- pages ------------------------------------------------------------------------ */
 
 void page_game() {
     heading("Save states");
-    note("A save state captures the whole game this instant, separate from the "
-         "memory card. Your normal save is still made by sleeping.");
-    for (int slot = 0; slot < 12; slot++) {
-        ImGui::PushID(slot);
-        char path[1024];
-        const bool exists = savestate_slot_exists(slot) != 0;
-        char when[64] = "empty";
-        struct stat st;
-        if (exists && savestate_slot_path(slot, path, sizeof(path)) && stat(path, &st) == 0) {
-            const time_t t = st.st_mtime;
-            std::strftime(when, sizeof(when), "%d %b %H:%M", std::localtime(&t));
+    note("A snapshot of the game this instant, separate from the memory card "
+         "(your normal save is still made by sleeping).");
+    const int cols = grid_cols(19.0f, 3);
+    if (begin_grid("##slots", cols)) {
+        for (int slot = 0; slot < 12; slot++) {
+            ImGui::TableNextColumn();
+            ImGui::PushID(slot);
+            char path[1024];
+            const bool exists = savestate_slot_exists(slot) != 0;
+            char when[64] = "empty";
+            struct stat st;
+            if (exists && savestate_slot_path(slot, path, sizeof(path)) && stat(path, &st) == 0) {
+                const time_t t = st.st_mtime;
+                std::strftime(when, sizeof(when), "%d %b %H:%M", std::localtime(&t));
+            }
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%2d", slot + 1);
+            ImGui::SameLine();
+            small_text_on_frame_line(when, !exists);
+            const float bw = em() * 3.6f, sp = ImGui::GetStyle().ItemInnerSpacing.x;
+            ImGui::SameLine();
+            const float room = ImGui::GetContentRegionAvail().x - (2 * bw + sp);
+            if (room > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + room);
+            if (ImGui::Button("Save", ImVec2(bw, 0))) {
+                if (psx_host_savestate_submit(slot, 1)) ui_set_menu_open(false);
+            }
+            ImGui::SameLine(0, sp);
+            ImGui::BeginDisabled(!exists);
+            if (ImGui::Button("Load", ImVec2(bw, 0))) {
+                if (psx_host_savestate_submit(slot, 0)) ui_set_menu_open(false);
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
         }
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("Slot %-2d  %s", slot + 1, when);
-        ImGui::SameLine(em() * 11.0f);
-        if (ImGui::Button("Save")) {
-            if (psx_host_savestate_submit(slot, 1)) ui_set_menu_open(false);
-        }
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!exists);
-        if (ImGui::Button("Load")) {
-            if (psx_host_savestate_submit(slot, 0)) ui_set_menu_open(false);
-        }
-        ImGui::EndDisabled();
-        ImGui::PopID();
+        ImGui::EndTable();
     }
 
-    heading("Game speed");
+    heading("Speed");
     static const float speeds[] = { 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
     static const char *const labels[] = { "0.5x", "1x", "1.5x", "2x", "3x", "4x" };
+    row_label("Game speed");
     if (segmented("speed", &g_ui.s.speed, speeds, labels, 6)) ui_save_settings();
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Fast-forward speed");
     static const float ffs[] = { 2.0f, 3.0f, 4.0f, 6.0f, 8.0f };
     static const char *const fflabels[] = { "2x", "3x", "4x", "6x", "8x" };
+    row_label("Fast-forward");
     if (segmented("ff", &g_ui.s.ff_speed, ffs, fflabels, 5)) ui_save_settings();
-    note("Fast-forward is toggled with the >> button on screen or R3 (click the "
-         "right stick). Sound is muted while the game runs at any speed but 1x.");
+    note("Fast-forward toggles with the >> button on screen or R3 (click the right "
+         "stick). Sound is muted at any speed but 1x.");
     if (ImGui::Checkbox("Show FPS counter", &g_ui.s.show_fps)) ui_save_settings();
 
     heading("Disc and app");
-    if (ImGui::Button("Change disc...")) s_confirm_disc = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Quit game")) s_confirm_quit = true;
     if (g_ui.restart_needed) {
-        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.38f, 0.10f, 1.0f));
         if (ImGui::Button("Restart now to apply changes")) {
             psx_host_shutdown();
             psx_android_restart_app();
         }
-        note("Unsaved progress since your last save (or save state) is lost.");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
     }
+    if (ImGui::Button("Change disc...")) s_confirm_disc = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Quit game")) s_confirm_quit = true;
+    if (g_ui.restart_needed) note("Restarting loses progress since your last save or save state.");
 }
 
 void page_graphics() {
     heading("Widescreen");
-    note("Shows more of the world on both sides instead of stretching the "
-         "picture. Menus and text keep their shape. Rough edges: about a second "
-         "of 4:3 after a battle, and a few interiors end at the old screen edge.");
     int ws = 0;   /* 0 off, 1 16:9, 2 16:10 */
     if (s_mods_ok && s_mods.feature_enabled(k_ws_pkg, k_ws_feat))
         ws = s_mods.feature_option_value(k_ws_pkg, k_ws_feat, "aspect") == "16:10" ? 2 : 1;
     static const int wsv[] = { 0, 1, 2 };
     static const char *const wsl[] = { "Off (4:3)", "16:9", "16:10" };
+    row_label("Aspect ratio");
     if (s_mods_ok && segmented("ws", &ws, wsv, wsl, 3)) {
         s_mods.set_feature_enabled(k_ws_pkg, k_ws_feat, ws != 0);
         if (ws) s_mods.set_feature_option(k_ws_pkg, k_ws_feat, "aspect", ws == 2 ? "16:10" : "16:9");
         save_mods();
         mark_restart();
     }
+    note("Shows more of the world at the sides instead of stretching; menus keep "
+         "their shape. Rough edges: about a second of 4:3 after a battle, and a "
+         "few interiors end at the old screen edge.");
     restart_note(g_ui.restart_needed);
 
     heading("Picture");
-    ImGui::TextUnformatted("Internal resolution");
     int scale = s_us.has_supersampling ? s_us.supersampling : psx_host_internal_scale();
     static const int sv[] = { 1, 2, 3, 4 };
-    static const char *const sl[] = { "1x (original)", "2x", "3x", "4x" };
+    static const char *const sl[] = { "1x", "2x", "3x", "4x" };
+    row_label("Resolution");
     if (segmented("scale", &scale, sv, sl, 4)) {
         s_us.has_supersampling = true;
         s_us.supersampling = scale;
         save_runtime_settings();
         mark_restart();
     }
-    note("Renders the 3D at a higher resolution for sharper edges. 4x needs a "
-         "fast phone; drop to 2x if the game slows down.");
+    note("Internal 3D resolution (1x is the original). 4x needs a fast phone; "
+         "drop to 2x if the game slows down.");
 
-    bool smooth = psx_host_video_smooth() != 0;
-    if (ImGui::Checkbox("Smooth scaling", &smooth)) {
-        psx_host_set_video_smooth(smooth);
-        s_us.has_antialiasing = true;
-        s_us.antialiasing = smooth;
-        save_runtime_settings();
-    }
-    note("Softens the picture when it is scaled up to your screen. Off keeps "
-         "hard pixel edges.");
-    bool bilinear = psx_host_texture_filter() != 0;
-    if (ImGui::Checkbox("Texture filtering", &bilinear)) {
-        psx_host_set_texture_filter(bilinear);
-        s_us.has_texture_filter = true;
-        s_us.texture_filter = bilinear ? 1 : 0;
-        save_runtime_settings();
-    }
-    note("Smooths textures instead of the original blocky texels.");
-
-    heading("Colour");
     int kind = psx_host_screen_kind();
     static const int kv[] = { 0, 1, 2, 3 };
     static const char *const kl[] = { "Raw", "CRT", "Composite", "Trinitron" };
+    row_label("Colour");
     if (segmented("kind", &kind, kv, kl, 4)) {
         psx_host_set_screen_kind(kind);
         s_us.has_screen_kind = true;
         s_us.screen_kind = kind;
         save_runtime_settings();
     }
-    note("How colours are mapped: the console's raw output, or the look of a "
-         "period TV. Trinitron is this port's default.");
+    note("The console's raw colours, or the look of a period TV (Trinitron is "
+         "this port's default).");
+
+    if (begin_grid("##filters", grid_cols(15.0f, 2))) {
+        ImGui::TableNextColumn();
+        bool smooth = psx_host_video_smooth() != 0;
+        if (ImGui::Checkbox("Smooth scaling", &smooth)) {
+            psx_host_set_video_smooth(smooth);
+            s_us.has_antialiasing = true;
+            s_us.antialiasing = smooth;
+            save_runtime_settings();
+        }
+        note("Softens the picture when scaled to your screen.");
+        ImGui::TableNextColumn();
+        bool bilinear = psx_host_texture_filter() != 0;
+        if (ImGui::Checkbox("Texture filtering", &bilinear)) {
+            psx_host_set_texture_filter(bilinear);
+            s_us.has_texture_filter = true;
+            s_us.texture_filter = bilinear ? 1 : 0;
+            save_runtime_settings();
+        }
+        note("Smooths the original blocky textures.");
+        ImGui::EndTable();
+    }
 }
 
 void page_audio() {
     heading("Volume");
     int vol = host_volume_get();
+    row_label("Game volume");
     ImGui::SetNextItemWidth(-1);
     if (ImGui::SliderInt("##vol", &vol, 0, 100, "%d%%")) {
         host_volume_set(vol);
@@ -284,19 +360,42 @@ void page_controls() {
     heading("On-screen controls");
     static const int mv[] = { TOUCH_AUTO, TOUCH_ALWAYS, TOUCH_OFF };
     static const char *const ml[] = { "Auto", "Always", "Hidden" };
+    row_label("Show");
     if (segmented("tm", &g_ui.s.touch_mode, mv, ml, 3)) ui_save_settings();
     note("Auto hides them while you play with a controller and brings them back "
          "when you touch the screen.");
-    ImGui::TextUnformatted("Opacity");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("##op", &g_ui.s.touch_opacity, 0.15f, 1.0f, "%.2f");
-    track_slider();
-    if (ImGui::IsItemDeactivatedAfterEdit()) ui_save_settings();
-    ImGui::TextUnformatted("Size");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("##sz", &g_ui.s.touch_scale, 0.7f, 1.5f, "%.2f");
-    track_slider();
-    if (ImGui::IsItemDeactivatedAfterEdit()) ui_save_settings();
+    if (begin_grid("##touch", grid_cols(16.0f, 2))) {
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Opacity");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        int op = (int)std::lround(g_ui.s.touch_opacity * 100.0f);
+        if (ImGui::SliderInt("##op", &op, 15, 100, "%d%%")) g_ui.s.touch_opacity = op / 100.0f;
+        track_slider();
+        if (ImGui::IsItemDeactivatedAfterEdit()) ui_save_settings();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Size");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        int sz = (int)std::lround(g_ui.s.touch_scale * 100.0f);
+        if (ImGui::SliderInt("##sz", &sz, 60, 160, "%d%%")) g_ui.s.touch_scale = sz / 100.0f;
+        track_slider();
+        if (ImGui::IsItemDeactivatedAfterEdit()) ui_save_settings();
+        ImGui::EndTable();
+    }
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.36f, 0.62f, 1.0f));
+    if (ImGui::Button("Move and resize controls...")) ui_begin_layout_edit();
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    if (ImGui::Button("Reset to default")) {
+        ui_reset_touch_layout();
+        ui_save_settings();
+        host_osd_push("Touch controls reset", 1200);
+    }
+    note("Move any button anywhere and set each one's size. Reset puts every "
+         "control back to its default size and place.");
 
     heading("Controller");
     int n = 0;
@@ -308,26 +407,30 @@ void page_controls() {
         ImGui::BulletText("%s", name ? name : "Controller");
     }
     SDL_free(ids);
-    ImGui::Spacing();
-    if (ImGui::BeginTable("map", 2, ImGuiTableFlags_BordersInnerH)) {
-        static const char *const rows[][2] = {
-            { "A / B / X / Y", "Cross / Circle / Square / Triangle" },
-            { "LB / RB,  LT / RT", "L1 / R1,  L2 / R2" },
-            { "Menu / View", "Start / Select" },
-            { "D-pad or left stick", "D-pad" },
-            { "View + Menu", "Open this menu" },
-            { "View + RB", "Quick save-state slots" },
-            { "R3 (click right stick)", "Fast-forward on/off" },
-        };
+    static const char *const rows[][2] = {
+        { "A / B / X / Y", "Cross / Circle / Square / Triangle" },
+        { "LB / RB, LT / RT", "L1 / R1, L2 / R2" },
+        { "Menu / View", "Start / Select" },
+        { "D-pad or left stick", "D-pad" },
+        { "View + Menu", "Open this menu" },
+        { "View + RB", "Quick save-state slots" },
+        { "R3 (click right stick)", "Fast-forward on/off" },
+        { "Back gesture", "Open this menu" },
+    };
+    const int pairs = grid_cols(22.0f, 2);
+    if (ImGui::BeginTable("map", pairs * 2, ImGuiTableFlags_BordersInnerH |
+                                            ImGuiTableFlags_SizingStretchProp |
+                                            ImGuiTableFlags_NoSavedSettings)) {
         for (auto &r : rows) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(r[0]);
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(r[1]);
+            ImGui::TableNextColumn();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.84f, 1.0f, 1.0f));
+            ImGui::TextWrapped("%s", r[0]);
+            ImGui::PopStyleColor();
+            ImGui::TableNextColumn();
+            ImGui::TextWrapped("%s", r[1]);
         }
         ImGui::EndTable();
     }
-    note("The menu also opens with Android's back gesture (swipe in from the "
-         "screen edge) or the menu button on the touch controls.");
 }
 
 /* Mods shown elsewhere or not usable in this build. */
@@ -344,12 +447,14 @@ void option_widget(const std::string &pkg, const std::string &feat,
     switch (o.type) {
     case PSXRecompV4::ModOptionType::Boolean: {
         bool b = v == "true";
-        if (ImGui::Checkbox(o.label.c_str(), &b)) { v = b ? "true" : "false"; changed = true; }
+        if (wrapped_checkbox(o.label.c_str(), &b)) { v = b ? "true" : "false"; changed = true; }
         break;
     }
     case PSXRecompV4::ModOptionType::Integer: {
         int iv = std::atoi(v.c_str());
+        ImGui::PushFont(g_ui.font_small);
         ImGui::TextUnformatted(o.label.c_str());
+        ImGui::PopFont();
         ImGui::SetNextItemWidth(-1);
         if (ImGui::SliderInt("##i", &iv, (int)o.min_value, (int)o.max_value)) {
             const int step = (int)std::max<int64_t>(1, o.step);
@@ -357,13 +462,12 @@ void option_widget(const std::string &pkg, const std::string &feat,
         }
         track_slider();
         if (ImGui::IsItemDeactivatedAfterEdit()) { v = std::to_string(iv); changed = true; }
-        else if (ImGui::IsItemActive()) {
-            /* show the live value without saving until release */
-        }
         break;
     }
     case PSXRecompV4::ModOptionType::Choice: {
+        ImGui::PushFont(g_ui.font_small);
         ImGui::TextUnformatted(o.label.c_str());
+        ImGui::PopFont();
         std::string cur_label = v;
         for (auto &c : o.choices) if (c.value == v) cur_label = c.label;
         ImGui::SetNextItemWidth(-1);
@@ -390,8 +494,8 @@ void page_enhancements() {
         note("The mod catalog could not be read.");
         return;
     }
-    note("Changes to the game's rules. They are applied when the game starts, "
-         "and turning one off restores the original game exactly.");
+    note("Changes to the game's rules, applied when the game starts. Turning one "
+         "off restores the original game exactly.");
     restart_note(g_ui.restart_needed);
     /* group -> (package, feature) */
     std::map<std::string, std::vector<std::pair<const PSXRecompV4::ModPackage *,
@@ -403,30 +507,30 @@ void page_enhancements() {
         for (auto &f : p->features)
             if (!hidden_feature(p->id, f.id)) groups[f.group].push_back({ p, &f });
     }
+    const int cols = grid_cols(14.0f, 3);
     for (auto &[group, feats] : groups) {
         heading(group.c_str());
+        if (!begin_grid(group.c_str(), cols)) continue;
         for (auto &[p, f] : feats) {
+            ImGui::TableNextColumn();
             ImGui::PushID((p->id + "/" + f->id).c_str());
             bool on = s_mods.feature_enabled(p->id, f->id);
-            if (ImGui::Checkbox(f->name.c_str(), &on)) {
+            if (wrapped_checkbox(f->name.c_str(), &on)) {
                 s_mods.set_feature_enabled(p->id, f->id, on);
                 save_mods();
                 mark_restart();
             }
-            if (!f->description.empty()) {
-                ImGui::Indent(em() * 1.9f);
-                note(f->description.c_str());
-                ImGui::Unindent(em() * 1.9f);
-            }
+            if (!f->description.empty()) note(f->description.c_str());
             if (on) {
-                ImGui::Indent(em() * 1.9f);
+                ImGui::Indent(em() * 0.8f);
                 for (auto &o : p->options)
                     if (o.feature_id == f->id) option_widget(p->id, f->id, o);
-                ImGui::Unindent(em() * 1.9f);
+                ImGui::Unindent(em() * 0.8f);
             }
-            ImGui::Spacing();
+            ImGui::Dummy(ImVec2(0, em() * 0.15f));
             ImGui::PopID();
         }
+        ImGui::EndTable();
     }
 }
 
@@ -437,22 +541,26 @@ void page_cheats() {
         note("The cheat list is not installed.");
         return;
     }
-    note("GameShark-style codes, applied instantly. Several change things the "
-         "game saves to your memory card (stats, items, story flags), so their "
-         "effects can outlast turning the cheat off. Back up saves first.");
+    note("GameShark-style codes, applied instantly. Some change things saved to "
+         "your memory card (stats, items, story flags), so their effects can "
+         "outlast turning them off. Back up your saves first.");
+    const int cols = grid_cols(15.0f, 3);
     std::string last_group;
-    bool open = false;
+    bool open = false, in_table = false;
     for (auto &o : p->options) {
         if (o.feature_id != k_cheats_feat) continue;
         if (o.group != last_group) {
+            if (in_table) { ImGui::EndTable(); in_table = false; }
             last_group = o.group;
-            ImGui::Spacing();
             open = ImGui::CollapsingHeader(o.group.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+            if (open) in_table = begin_grid(o.group.c_str(), cols);
+            open = open && in_table;
         }
         if (!open) continue;
+        ImGui::TableNextColumn();
         const std::string v = s_mods.feature_option_value(k_cheats_pkg, k_cheats_feat, o.id);
         bool on = v == "true";
-        if (ImGui::Checkbox(o.label.c_str(), &on)) {
+        if (wrapped_checkbox(o.label.c_str(), &on)) {
             /* Hand the whole list to these toggles (the cheats feature), then
              * flip this one live in the running game. */
             if (!s_mods.feature_enabled(k_cheats_pkg, k_cheats_feat))
@@ -462,6 +570,7 @@ void page_cheats() {
             psx_cheats_set_enabled(o.label.c_str(), on ? 1 : 0);
         }
     }
+    if (in_table) ImGui::EndTable();
 }
 
 /* ---- Partner: Digimon World's own data ------------------------------------------ */
@@ -479,10 +588,11 @@ void wr16(uint32_t a, int v) { psx_write_half(a, (uint16_t)(int16_t)v); }
 
 bool stat_slider(const char *label, uint32_t addr, int lo, int hi) {
     int v = rd16(addr);
+    ImGui::TableNextColumn();
     ImGui::PushID((int)addr);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(em() * 9.0f);
+    ImGui::SameLine(em() * 7.0f);
     ImGui::SetNextItemWidth(-1);
     const bool changed = ImGui::SliderInt("##v", &v, lo, hi);
     track_slider();
@@ -505,49 +615,60 @@ void page_partner() {
         name[i] = (c >= 32 && c < 127) ? (char)c : '?';
     }
     ImGui::PushFont(g_ui.font_big);
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("%s", name[0] ? name : "Partner");
     ImGui::PopFont();
-    note("Values change the running game immediately. Stats and care values are "
-         "saved to your memory card the next time you sleep.");
-
-    heading("Battle stats");
-    stat_slider("Offense", STATS + 0x00, 0, 999);
-    stat_slider("Defense", STATS + 0x02, 0, 999);
-    stat_slider("Speed", STATS + 0x04, 0, 999);
-    stat_slider("Brains", STATS + 0x06, 0, 999);
-    stat_slider("Max HP", STATS + 0x10, 1, 9999);
-    stat_slider("Max MP", STATS + 0x12, 0, 9999);
-    stat_slider("HP", STATS + 0x14, 1, std::max(1, (int)rd16(STATS + 0x10)));
-    stat_slider("MP", STATS + 0x16, 0, std::max(0, (int)rd16(STATS + 0x12)));
+    ImGui::SameLine();
     if (ImGui::Button("Restore HP and MP")) {
         wr16(STATS + 0x14, rd16(STATS + 0x10));
         wr16(STATS + 0x16, rd16(STATS + 0x12));
     }
+    note("Changes apply to the running game at once. Stats and care values reach "
+         "your memory card the next time you sleep.");
+
+    const int cols = grid_cols(17.0f, 3);
+    heading("Battle stats");
+    if (begin_grid("##battle", cols)) {
+        stat_slider("Offense", STATS + 0x00, 0, 999);
+        stat_slider("Defense", STATS + 0x02, 0, 999);
+        stat_slider("Speed", STATS + 0x04, 0, 999);
+        stat_slider("Brains", STATS + 0x06, 0, 999);
+        stat_slider("Max HP", STATS + 0x10, 1, 9999);
+        stat_slider("Max MP", STATS + 0x12, 0, 9999);
+        stat_slider("HP", STATS + 0x14, 1, std::max(1, (int)rd16(STATS + 0x10)));
+        stat_slider("MP", STATS + 0x16, 0, std::max(0, (int)rd16(STATS + 0x12)));
+        ImGui::EndTable();
+    }
 
     heading("Care");
-    stat_slider("Happiness", PARA + 0x2A, -100, 100);
-    stat_slider("Discipline", PARA + 0x28, 0, 100);
-    stat_slider("Tiredness", PARA + 0x22, 0, 100);
-    stat_slider("Weight", PARA + 0x42, 1, 99);
-    stat_slider("Care mistakes", PARA + 0x52, 0, 99);
-    stat_slider("Virus", PARA + 0x1E, 0, 16);
-    stat_slider("Battles won", PARA + 0x54, 0, 999);
+    if (begin_grid("##care", cols)) {
+        stat_slider("Happiness", PARA + 0x2A, -100, 100);
+        stat_slider("Discipline", PARA + 0x28, 0, 100);
+        stat_slider("Tiredness", PARA + 0x22, 0, 100);
+        stat_slider("Weight", PARA + 0x42, 1, 99);
+        stat_slider("Mistakes", PARA + 0x52, 0, 99);
+        stat_slider("Virus", PARA + 0x1E, 0, 16);
+        stat_slider("Battles won", PARA + 0x54, 0, 999);
+        ImGui::EndTable();
+    }
 
-    heading("Age and lifespan");
-    stat_slider("Age (days)", PARA + 0x4A, 0, 99);
-    stat_slider("Lifespan left (h)", PARA + 0x48, 0, 999);
+    heading("Age, lifespan and tamer");
+    if (begin_grid("##age", cols)) {
+        stat_slider("Age (days)", PARA + 0x4A, 0, 99);
+        stat_slider("Life left (h)", PARA + 0x48, 0, 999);
+        ImGui::TableNextColumn();
+        int bits = (int)psx_read_word(BITS);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Bits");
+        ImGui::SameLine(em() * 7.0f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("##bits", &bits, 0, 999999)) psx_write_word(BITS, (uint32_t)bits);
+        track_slider();
+        stat_slider("Merit", MERIT, 0, 9999);
+        ImGui::EndTable();
+    }
     note("Lifespan is counted in in-game hours; when it runs out your partner "
          "dies of old age.");
-
-    heading("Tamer");
-    int bits = (int)psx_read_word(BITS);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Bits");
-    ImGui::SameLine(em() * 9.0f);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::SliderInt("##bits", &bits, 0, 999999)) psx_write_word(BITS, (uint32_t)bits);
-    track_slider();
-    stat_slider("Merit", MERIT, 0, 9999);
 }
 
 void page_about() {
@@ -557,10 +678,9 @@ void page_about() {
          "game: your disc was translated into C on this phone and is compiled "
          "each time the game starts.");
     heading("Credits");
-    ImGui::BulletText("psx-recomp-port (Digimon World) by ethan4love");
-    ImGui::BulletText("PSXRecomp framework by Matthew Stan (PolyForm Noncommercial)");
-    ImGui::BulletText("OpenBIOS (PCSX-Redux project), bundled BIOS");
-    ImGui::BulletText("TinyCC, SDL3, Dear ImGui, libchdr, rabbitizer");
+    note("psx-recomp-port (Digimon World) by ethan4love. PSXRecomp framework by "
+         "Matthew Stan (PolyForm Noncommercial). OpenBIOS (PCSX-Redux project). "
+         "TinyCC, SDL3, Dear ImGui, libchdr, rabbitizer.");
     heading("Your files");
     ImGui::TextWrapped("%s", g_ui.data_dir.c_str());
     note("Saves are in saves/card1.mcd; back them up over USB. This folder is "
@@ -612,7 +732,7 @@ void ui_menu_on_open() {
 void ui_menu_draw() {
     s_slider_active_last = s_slider_active;
     s_slider_active = false;
-    const float margin = 10.0f * g_ui.dpi;
+    const float margin = 6.0f * g_ui.dpi;
     ImGui::SetNextWindowPos(ImVec2(margin, margin));
     ImGui::SetNextWindowSize(ImVec2(g_ui.width - 2 * margin, g_ui.height - 2 * margin));
     ImGui::Begin("##menu", nullptr,
@@ -632,13 +752,17 @@ void ui_menu_draw() {
     ImGui::Separator();
 
     /* Sidebar */
-    const float side_w = em() * 9.0f;
+    const float side_w = em() * 8.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f * g_ui.dpi));
+    ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
     ImGui::BeginChild("##side", ImVec2(side_w, 0), ImGuiChildFlags_None);
+    touch_scroll();
     for (int i = 0; i < SEC_COUNT; i++) {
-        if (ImGui::Selectable(k_section_names[i], s_section == i, 0, ImVec2(0, em() * 2.2f)))
+        if (ImGui::Selectable(k_section_names[i], s_section == i, 0, ImVec2(0, em() * 1.9f)))
             s_section = (Section)i;
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     ImGui::SameLine();
 
     /* Content */
@@ -655,7 +779,7 @@ void ui_menu_draw() {
     case SEC_ABOUT: page_about(); break;
     default: break;
     }
-    ImGui::Dummy(ImVec2(0, em() * 2));
+    ImGui::Dummy(ImVec2(0, em()));
     ImGui::EndChild();
 
     confirm_popups();
