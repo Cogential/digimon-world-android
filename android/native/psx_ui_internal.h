@@ -75,7 +75,9 @@ extern UiState g_ui;
 
 void ui_save_settings();
 void ui_set_menu_open(bool open);
-void ui_begin_layout_edit();     /* leave the menu for the touch layout editor */
+/* Open the touch layout editor (game paused). from_menu: Done goes back to
+ * the menu's Controls page rather than to the game. */
+void ui_begin_layout_edit(bool from_menu);
 void ui_reset_touch_layout();    /* default size and place for every control */
 void ui_menu_draw();            /* psx_ui_menu.cpp */
 void ui_menu_on_open();         /* psx_ui_menu.cpp: refresh cached state */

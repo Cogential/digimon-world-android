@@ -136,6 +136,10 @@ struct Finger {
 
 Finger s_fingers[10];
 
+/* The on-screen menu button: a tap opens the menu, holding it this long opens
+ * the touch-control editor instead. */
+constexpr uint64_t k_menu_hold_ms = 550;
+
 /* The game samples the pad once per frame, so a tap shorter than a frame
  * could be missed entirely. Every press is held for at least this long. */
 constexpr uint64_t k_min_press_ms = 80;
@@ -283,7 +287,7 @@ void finger_down(SDL_FingerID id, ImVec2 p) {
     if (const TouchButton *b = hit_button(p, 1.35f)) {
         f->kind = b->kind;
         f->bits = b->bit;
-        if (b->kind == CTL_MENU) ui_set_menu_open(true);
+        /* The menu button acts on release (a tap) or after a hold. */
         if (b->kind == CTL_FF) g_ui.ff_active = !g_ui.ff_active;
     }
 }
@@ -307,8 +311,18 @@ void finger_up(SDL_FingerID id) {
         if (!f.active || f.id != id) continue;
         if ((f.kind == CTL_DPAD || f.kind == CTL_BUTTON) && f.bits)
             s_latched.push_back({ f.bits, f.down_ms + k_min_press_ms });
+        const bool menu_tap = f.kind == CTL_MENU;
         f = Finger();
+        if (menu_tap) ui_set_menu_open(true);   /* released before the hold */
     }
+}
+
+/* How far along a hold on the menu button is (0..1), or -1 if none. */
+float menu_hold_progress() {
+    for (const Finger &f : s_fingers)
+        if (f.active && f.kind == CTL_MENU)
+            return std::min(1.0f, (float)(SDL_GetTicks() - f.down_ms) / (float)k_menu_hold_ms);
+    return -1.0f;
 }
 
 void release_all_fingers() {
@@ -318,6 +332,10 @@ void release_all_fingers() {
 }
 
 void recompute_touch_bits() {
+    if (menu_hold_progress() >= 1.0f) {
+        ui_begin_layout_edit(false);   /* held long enough: edit the controls */
+        return;
+    }
     uint16_t bits = 0;
     for (const Finger &f : s_fingers)
         if (f.active && (f.kind == CTL_DPAD || f.kind == CTL_BUTTON)) bits |= f.bits;
@@ -361,6 +379,9 @@ void poll_gamepads() {
 }
 
 void end_layout_edit(bool keep);
+void edit_finger_down(SDL_FingerID id, ImVec2 p);
+void edit_finger_motion(SDL_FingerID id, ImVec2 p);
+void edit_finger_up(SDL_FingerID id);
 
 /* Consume queued events: to ImGui while the menu or the layout editor is
  * open, to the touch controls otherwise. */
@@ -378,14 +399,26 @@ void pump_events() {
             continue;
         }
         if (ev.type == SDL_EVENT_KEY_UP && ev.key.key == SDLK_AC_BACK) continue;
-        if (g_ui.menu_open || g_ui.layout_edit) {
+        const ImVec2 p(ev.tfinger.x * (float)g_ui.width, ev.tfinger.y * (float)g_ui.height);
+        if (g_ui.layout_edit) {
+            /* The editor reads fingers directly (it needs two for a pinch);
+             * its panel is ImGui's, reached through synthesized mouse. */
+            switch (ev.type) {
+            case SDL_EVENT_FINGER_DOWN: edit_finger_down(ev.tfinger.fingerID, p); break;
+            case SDL_EVENT_FINGER_MOTION: edit_finger_motion(ev.tfinger.fingerID, p); break;
+            case SDL_EVENT_FINGER_UP:
+            case SDL_EVENT_FINGER_CANCELED: edit_finger_up(ev.tfinger.fingerID); break;
+            default: ImGui_ImplSDL3_ProcessEvent(&ev); break;
+            }
+            continue;
+        }
+        if (g_ui.menu_open) {
             /* Touch reaches ImGui as SDL's synthesized mouse events. */
             if (ev.type != SDL_EVENT_FINGER_DOWN && ev.type != SDL_EVENT_FINGER_UP &&
                 ev.type != SDL_EVENT_FINGER_MOTION && ev.type != SDL_EVENT_FINGER_CANCELED)
                 ImGui_ImplSDL3_ProcessEvent(&ev);
             continue;
         }
-        const ImVec2 p(ev.tfinger.x * (float)g_ui.width, ev.tfinger.y * (float)g_ui.height);
         switch (ev.type) {
         case SDL_EVENT_FINGER_DOWN: finger_down(ev.tfinger.fingerID, p); break;
         case SDL_EVENT_FINGER_MOTION: finger_motion(ev.tfinger.fingerID, p); break;
@@ -490,6 +523,13 @@ void draw_touch(ImDrawList *dl) {
             if (b.kind == CTL_MENU) {   /* three bars */
                 for (int i = -1; i <= 1; i++)
                     dl->AddLine(ImVec2(b.c.x - s, b.c.y + i * s * 0.6f), ImVec2(b.c.x + s, b.c.y + i * s * 0.6f), rim, line);
+                /* While held, a ring fills towards opening the editor. */
+                const float hold = menu_hold_progress();
+                if (hold > 0.1f) {
+                    const float a0 = -(float)M_PI * 0.5f;
+                    dl->PathArcTo(b.c, r + line, a0, a0 + hold * 2.0f * (float)M_PI, 40);
+                    dl->PathStroke(col(255, 204, 64, 1.0f), 0, line * 1.3f);
+                }
             } else {                     /* fast-forward: two chevrons */
                 for (int i = 0; i < 2; i++) {
                     const float x0 = b.c.x - s * 0.9f + i * s * 0.9f;
@@ -505,20 +545,31 @@ void draw_touch(ImDrawList *dl) {
 
 /* ---- layout editor ------------------------------------------------------------------ */
 
-/* The game stays paused while the player drags controls around. A tap selects
- * the control under the finger; dragging moves it; the panel in the middle
- * resizes the selected one, and can reset or undo everything. */
+/* Opened by holding the menu button (or from the menu's Controls page), with
+ * the game paused. Touch goes straight to the controls: press a control and
+ * drag to move it, pinch it with two fingers to resize it (it also follows
+ * the fingers). A panel holds the transparency and overall size sliders and
+ * the reset, cancel and done buttons; it hides while a control is handled
+ * and steps aside from the one picked. */
 UiSettings s_edit_backup;
-int s_edit_sel = -1;
-bool s_edit_drag = false;
-ImVec2 s_edit_grab;
+bool s_edit_from_menu = false;     /* Done returns to the menu, not the game */
+int s_edit_sel = -1;               /* picked control */
 
-int el_at(ImVec2 p) {
+struct EditFinger { SDL_FingerID id = 0; bool active = false; ImVec2 pos; };
+EditFinger s_ef[2];
+bool s_edit_drag = false;          /* one finger moving the picked control */
+ImVec2 s_edit_grab;                /* finger offset from the control's centre */
+bool s_pinch = false;              /* two fingers resizing it */
+float s_pinch_d0 = 1.0f, s_pinch_scale0 = 1.0f;
+ImVec2 s_pinch_mid0, s_pinch_c0;
+ImVec4 s_panel_rect(0, 0, 0, 0);   /* last frame's panel (x0, y0, x1, y1) */
+bool s_panel_shown = false;
+
+int el_at(ImVec2 p, float slack = 1.3f) {
     int best = -1;
     float best_d = 1e30f;
     for (int e = 0; e < EL_COUNT; e++) {
         const ImVec2 c = s_el_c[e], h = s_el_half[e];
-        const float slack = 1.2f;
         if (std::fabs(p.x - c.x) > h.x * slack || std::fabs(p.y - c.y) > h.y * slack) continue;
         const float d = (p.x - c.x) * (p.x - c.x) + (p.y - c.y) * (p.y - c.y);
         if (d < best_d) { best = e; best_d = d; }
@@ -526,44 +577,114 @@ int el_at(ImVec2 p) {
     return best;
 }
 
+/* Nearest control to p, however far (for a pinch that starts beside one). */
+int el_nearest(ImVec2 p) {
+    int best = -1;
+    float best_d = 1e30f;
+    for (int e = 0; e < EL_COUNT; e++) {
+        const float dx = p.x - s_el_c[e].x, dy = p.y - s_el_c[e].y;
+        if (dx * dx + dy * dy < best_d) { best = e; best_d = dx * dx + dy * dy; }
+    }
+    return best;
+}
+
+void set_el_center(int e, ImVec2 c) {
+    const float W = (float)g_ui.width, H = (float)g_ui.height;
+    c.x = std::clamp(c.x, 0.0f, W);
+    c.y = std::clamp(c.y, 0.0f, H);
+    g_ui.s.ctl[e].dx = (c.x - s_el_home[e].x) / W;
+    g_ui.s.ctl[e].dy = (c.y - s_el_home[e].y) / H;
+}
+
+float dist(ImVec2 a, ImVec2 b) { return std::hypot(a.x - b.x, a.y - b.y); }
+ImVec2 midpoint(ImVec2 a, ImVec2 b) { return ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f); }
+
+void begin_pinch() {
+    if (s_edit_sel < 0) s_edit_sel = el_nearest(midpoint(s_ef[0].pos, s_ef[1].pos));
+    if (s_edit_sel < 0) return;
+    s_pinch = true;
+    s_edit_drag = false;
+    s_pinch_d0 = std::max(1.0f, dist(s_ef[0].pos, s_ef[1].pos));
+    s_pinch_scale0 = g_ui.s.ctl[s_edit_sel].scale;
+    s_pinch_mid0 = midpoint(s_ef[0].pos, s_ef[1].pos);
+    s_pinch_c0 = s_el_c[s_edit_sel];
+}
+
+void edit_finger_down(SDL_FingerID id, ImVec2 p) {
+    /* Touches on the panel are ImGui's (through SDL's synthesized mouse). */
+    if (s_panel_shown && p.x >= s_panel_rect.x && p.x <= s_panel_rect.z &&
+        p.y >= s_panel_rect.y && p.y <= s_panel_rect.w)
+        return;
+    EditFinger *slot = !s_ef[0].active ? &s_ef[0] : !s_ef[1].active ? &s_ef[1] : nullptr;
+    if (!slot) return;
+    slot->id = id;
+    slot->active = true;
+    slot->pos = p;
+    if (s_ef[0].active && s_ef[1].active) {
+        begin_pinch();
+        return;
+    }
+    s_edit_sel = el_at(p);
+    s_edit_drag = s_edit_sel >= 0;
+    if (s_edit_drag) s_edit_grab = ImVec2(p.x - s_el_c[s_edit_sel].x, p.y - s_el_c[s_edit_sel].y);
+}
+
+void edit_finger_motion(SDL_FingerID id, ImVec2 p) {
+    EditFinger *f = s_ef[0].active && s_ef[0].id == id ? &s_ef[0]
+                  : s_ef[1].active && s_ef[1].id == id ? &s_ef[1] : nullptr;
+    if (!f) return;
+    f->pos = p;
+    if (s_pinch && s_ef[0].active && s_ef[1].active) {
+        const float ratio = dist(s_ef[0].pos, s_ef[1].pos) / s_pinch_d0;
+        g_ui.s.ctl[s_edit_sel].scale = std::clamp(s_pinch_scale0 * ratio, k_el_min_scale, k_el_max_scale);
+        const ImVec2 mid = midpoint(s_ef[0].pos, s_ef[1].pos);
+        set_el_center(s_edit_sel, ImVec2(s_pinch_c0.x + mid.x - s_pinch_mid0.x,
+                                         s_pinch_c0.y + mid.y - s_pinch_mid0.y));
+        layout_touch();
+    } else if (s_edit_drag && s_edit_sel >= 0) {
+        set_el_center(s_edit_sel, ImVec2(p.x - s_edit_grab.x, p.y - s_edit_grab.y));
+        layout_touch();
+    }
+}
+
+void edit_finger_up(SDL_FingerID id) {
+    for (EditFinger &f : s_ef)
+        if (f.active && f.id == id) f = EditFinger();
+    if (s_pinch) {
+        /* Down to one finger: carry on moving from where it is, no jump. */
+        s_pinch = false;
+        EditFinger *left = s_ef[0].active ? &s_ef[0] : s_ef[1].active ? &s_ef[1] : nullptr;
+        s_edit_drag = left && s_edit_sel >= 0;
+        if (s_edit_drag)
+            s_edit_grab = ImVec2(left->pos.x - s_el_c[s_edit_sel].x, left->pos.y - s_el_c[s_edit_sel].y);
+    } else if (!s_ef[0].active && !s_ef[1].active) {
+        s_edit_drag = false;
+    }
+}
+
 void end_layout_edit(bool keep) {
     if (!keep) g_ui.s = s_edit_backup;
     g_ui.layout_edit = false;
-    s_edit_drag = false;
+    for (EditFinger &f : s_ef) f = EditFinger();
+    s_edit_drag = s_pinch = false;
     ui_save_settings();
     layout_touch();
-    ui_set_menu_open(true);     /* back to the Controls page */
+    if (s_edit_from_menu) {
+        ui_set_menu_open(true);   /* back to the Controls page */
+    } else {
+        release_all_fingers();
+        psx_host_input_guard();   /* back to the game */
+    }
 }
 
 void layout_editor() {
-    ImGuiIO &io = ImGui::GetIO();
     const float W = (float)g_ui.width, H = (float)g_ui.height;
     ImDrawList *dl = ImGui::GetBackgroundDrawList();
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), IM_COL32(0, 0, 0, 90));
 
-    /* Drag first, so what is drawn this frame is where the finger is. */
-    const bool over_panel = ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) || ImGui::IsAnyItemActive();
-    if (ImGui::IsMouseClicked(0) && !over_panel) {
-        s_edit_sel = el_at(io.MousePos);
-        s_edit_drag = s_edit_sel >= 0;
-        if (s_edit_drag)
-            s_edit_grab = ImVec2(io.MousePos.x - s_el_c[s_edit_sel].x, io.MousePos.y - s_el_c[s_edit_sel].y);
-    }
-    if (s_edit_drag && io.MouseDown[0]) {
-        const int e = s_edit_sel;
-        const float cx = std::clamp(io.MousePos.x - s_edit_grab.x, 0.0f, W);
-        const float cy = std::clamp(io.MousePos.y - s_edit_grab.y, 0.0f, H);
-        g_ui.s.ctl[e].dx = (cx - s_el_home[e].x) / W;
-        g_ui.s.ctl[e].dy = (cy - s_el_home[e].y) / H;
-        layout_touch();
-    }
-    if (!io.MouseDown[0]) s_edit_drag = false;
-
-    const float saved_opacity = g_ui.s.touch_opacity;
-    g_ui.s.touch_opacity = std::max(saved_opacity, 0.8f);
+    /* Drawn at the chosen transparency, so the slider previews it. */
     s_touch_bits = 0;
     draw_touch(dl);
-    g_ui.s.touch_opacity = saved_opacity;
     for (int e = 0; e < EL_COUNT; e++) {
         const ImVec2 c = s_el_c[e], h = s_el_half[e];
         const bool sel = e == s_edit_sel;
@@ -572,9 +693,8 @@ void layout_editor() {
                     6.0f * g_ui.dpi, 0, (sel ? 3.0f : 1.5f) * g_ui.dpi);
     }
 
-    /* The panel hides while a control is dragged, and steps aside from the
-     * picked control so it never covers it. */
-    if (s_edit_drag) return;
+    s_panel_shown = !(s_edit_drag || s_pinch);
+    if (!s_panel_shown) return;
     ImVec2 panel_pos(W * 0.5f, H * 0.5f), pivot(0.5f, 0.5f);
     if (s_edit_sel >= 0) {
         const ImVec2 c = s_el_c[s_edit_sel];
@@ -592,9 +712,18 @@ void layout_editor() {
     const float em = ImGui::GetFontSize();
     ImGui::TextUnformatted("Customize touch controls");
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.66f, 0.76f, 1.0f));
-    ImGui::TextWrapped("Drag a control to move it. Tap one to pick it, then set its size here.");
+    ImGui::TextWrapped("Drag a control to move it. Pinch it with two fingers to resize it.");
     ImGui::PopStyleColor();
     ImGui::Separator();
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Transparency");
+    ImGui::SameLine(em * 7.0f);
+    ImGui::SetNextItemWidth(-1);
+    /* Shown as transparency (0% = solid), stored as opacity. */
+    int clear = (int)std::lround((1.0f - g_ui.s.touch_opacity) * 100.0f);
+    if (ImGui::SliderInt("##clear", &clear, 0, 85, "%d%%"))
+        g_ui.s.touch_opacity = 1.0f - clear / 100.0f;
 
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("All controls");
@@ -609,20 +738,12 @@ void layout_editor() {
     if (s_edit_sel >= 0) {
         CtlPlace &p = g_ui.s.ctl[s_edit_sel];
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(k_el_names[s_edit_sel]);
-        ImGui::SameLine(em * 7.0f);
-        ImGui::SetNextItemWidth(-1);
-        int pct = (int)std::lround(p.scale * 100.0f);
-        if (ImGui::SliderInt("##one", &pct, (int)(k_el_min_scale * 100), (int)(k_el_max_scale * 100), "%d%%")) {
-            p.scale = pct / 100.0f;
-            layout_touch();
-        }
+        ImGui::Text("%s  %d%%", k_el_names[s_edit_sel], (int)std::lround(p.scale * 100.0f));
+        ImGui::SameLine();
         if (ImGui::Button("Reset this control")) {
             p = CtlPlace();
             layout_touch();
         }
-    } else {
-        ImGui::TextDisabled("No control picked");
     }
     ImGui::Separator();
     if (ImGui::Button("Reset all")) {
@@ -635,6 +756,8 @@ void layout_editor() {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.24f, 1.0f));
     if (ImGui::Button("Done", ImVec2(em * 5.0f, 0))) end_layout_edit(true);
     ImGui::PopStyleColor();
+    const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+    s_panel_rect = ImVec4(wp.x, wp.y, wp.x + ws.x, wp.y + ws.y);
     ImGui::End();
 }
 
@@ -754,10 +877,12 @@ void ui_set_menu_open(bool open) {
     }
 }
 
-void ui_begin_layout_edit() {
+void ui_begin_layout_edit(bool from_menu) {
     s_edit_backup = g_ui.s;
+    s_edit_from_menu = from_menu;
     s_edit_sel = -1;
-    s_edit_drag = false;
+    s_edit_drag = s_pinch = false;
+    for (EditFinger &f : s_ef) f = EditFinger();
     g_ui.menu_open = false;     /* the game stays paused: see psx_ui_menu_open */
     release_all_fingers();
     g_ui.layout_edit = true;

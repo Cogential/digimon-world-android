@@ -386,29 +386,8 @@ void page_controls() {
     if (segmented("tm", &g_ui.s.touch_mode, mv, ml, 3)) ui_save_settings();
     note("Auto hides them while you play with a controller and brings them back "
          "when you touch the screen.");
-    if (begin_grid("##touch", grid_cols(16.0f, 2))) {
-        ImGui::TableNextColumn();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Opacity");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
-        int op = (int)std::lround(g_ui.s.touch_opacity * 100.0f);
-        if (ImGui::SliderInt("##op", &op, 15, 100, "%d%%")) g_ui.s.touch_opacity = op / 100.0f;
-        track_slider();
-        if (ImGui::IsItemDeactivatedAfterEdit()) ui_save_settings();
-        ImGui::TableNextColumn();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Size");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
-        int sz = (int)std::lround(g_ui.s.touch_scale * 100.0f);
-        if (ImGui::SliderInt("##sz", &sz, 60, 160, "%d%%")) g_ui.s.touch_scale = sz / 100.0f;
-        track_slider();
-        if (ImGui::IsItemDeactivatedAfterEdit()) ui_save_settings();
-        ImGui::EndTable();
-    }
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.36f, 0.62f, 1.0f));
-    if (ImGui::Button("Move and resize controls...")) ui_begin_layout_edit();
+    if (ImGui::Button("Customize controls...")) ui_begin_layout_edit(true);
     ImGui::PopStyleColor();
     ImGui::SameLine();
     if (ImGui::Button("Reset to default")) {
@@ -416,8 +395,9 @@ void page_controls() {
         ui_save_settings();
         host_osd_push("Touch controls reset", 1200);
     }
-    note("Move any button anywhere and set each one's size. Reset puts every "
-         "control back to its default size and place.");
+    note("Move, resize and set the transparency of the controls. Shortcut: hold the "
+         "menu button on screen for a moment. Reset puts every control back to its "
+         "default size and place.");
 
     heading("Controller");
     int n = 0;
