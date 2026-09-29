@@ -46,6 +46,8 @@ const char *const k_section_names[SEC_COUNT] = {
 Section s_section = SEC_GAME;
 bool s_slider_active_last = false, s_slider_active = false;
 bool s_confirm_quit = false, s_confirm_disc = false;
+int s_confirm_load_slot = -1;   /* slot waiting for "load anyway" */
+int s_confirm_load_match = 0;   /* its savestate_slot_mods_match() */
 
 /* Runtime-owned settings (settings.toml) and mods (mods/state.toml). */
 PSXRecompV4::UserSettings s_us;
@@ -236,7 +238,15 @@ void page_game() {
             ImGui::SameLine(0, sp);
             ImGui::BeginDisabled(!exists);
             if (ImGui::Button("Load", ImVec2(bw, 0))) {
-                if (psx_host_savestate_submit(slot, 0)) ui_set_menu_open(false);
+                /* A state from under other Enhancements would bring their
+                 * code patches back with it: ask first. */
+                const int match = savestate_slot_mods_match(slot);
+                if (match == 1) {
+                    if (psx_host_savestate_submit(slot, 0)) ui_set_menu_open(false);
+                } else {
+                    s_confirm_load_slot = slot;
+                    s_confirm_load_match = match;
+                }
             }
             ImGui::EndDisabled();
             ImGui::PopID();
@@ -700,6 +710,36 @@ void page_about() {
 }
 
 void confirm_popups() {
+    static int s_load_slot = -1, s_load_match = 0;
+    if (s_confirm_load_slot >= 0) {
+        s_load_slot = s_confirm_load_slot;
+        s_load_match = s_confirm_load_match;
+        s_confirm_load_slot = -1;
+        ImGui::OpenPopup("Load this save state?");
+    }
+    ImGui::SetNextWindowPos(ImVec2(g_ui.width * 0.5f, g_ui.height * 0.5f), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(g_ui.width * 0.6f, (float)g_ui.height));
+    if (ImGui::BeginPopupModal("Load this save state?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(g_ui.width * 0.55f);
+        if (s_load_match == 0)
+            ImGui::TextWrapped("Slot %d was saved with different Enhancements turned on.", s_load_slot + 1);
+        else
+            ImGui::TextWrapped("Slot %d was saved by an older version of the app, which did not "
+                               "record which Enhancements were on.", s_load_slot + 1);
+        note("A save state brings back the game exactly as it was, including the changes "
+             "the Enhancements on at the time made to the game. Ones you have turned off "
+             "since would stay on until you restart, and in rare cases the game can "
+             "misbehave. Your memory card is not affected.");
+        ImGui::PopTextWrapPos();
+        if (ImGui::Button("Load anyway", ImVec2(em() * 8, 0))) {
+            ImGui::CloseCurrentPopup();
+            if (psx_host_savestate_submit(s_load_slot, 2)) ui_set_menu_open(false);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(em() * 7, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     if (s_confirm_quit) { ImGui::OpenPopup("Quit?"); s_confirm_quit = false; }
     if (s_confirm_disc) { ImGui::OpenPopup("Change disc?"); s_confirm_disc = false; }
     const ImVec2 center(g_ui.width * 0.5f, g_ui.height * 0.5f);

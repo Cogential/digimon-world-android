@@ -60,7 +60,12 @@ public class SetupActivity extends Activity {
     static native String nativeTranslate(String dataDir, String discPath, String exeSha256);
     static native boolean nativeIsTranslated(String dataDir, String exeSha256);
 
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    /* One worker for the whole process, not per screen: if Android recreates
+     * this activity (a configuration change it does not handle itself) while
+     * a copy or translation is running, the new instance's work queues behind
+     * the old one instead of translating into the same folder at the same
+     * time. Its own check then finds the finished result and moves on. */
+    private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private File dataDir;
     private TextView message;
@@ -98,13 +103,15 @@ public class SetupActivity extends Activity {
         dataDir = dataDir(this);
         buildUi();
         showBusy("Getting ready…", -1);
-        worker.execute(new Runnable() { public void run() { prepare(); } });
+        WORKER.execute(new Runnable() { public void run() { prepare(); } });
     }
 
-    @Override
-    protected void onDestroy() {
-        worker.shutdownNow();
-        super.onDestroy();
+    /** Run on the UI thread, unless this screen has gone away meanwhile (its
+     *  replacement, if any, picks up from the state on disk). */
+    private void onUi(final Runnable r) {
+        ui.post(new Runnable() { public void run() {
+            if (!isFinishing() && !isDestroyed()) r.run();
+        } });
     }
 
     /* ---- flow ------------------------------------------------------------ */
@@ -114,30 +121,30 @@ public class SetupActivity extends Activity {
             PayloadInstaller.sync(this, dataDir);
         } catch (IOException e) {
             final String msg = "Could not install the game's support files: " + e.getMessage();
-            ui.post(new Runnable() { public void run() { showError(msg, false); } });
+            onUi(new Runnable() { public void run() { showError(msg, false); } });
             return;
         }
         final File disc = currentDisc(dataDir);
         if (disc == null) {
-            ui.post(new Runnable() { public void run() { showWelcome(); } });
+            onUi(new Runnable() { public void run() { showWelcome(); } });
         } else if (nativeIsTranslated(dataDir.getPath(), EXE_SHA256)) {
-            ui.post(new Runnable() { public void run() { startGame(disc); } });
+            onUi(new Runnable() { public void run() { startGame(disc); } });
         } else {
             translate(disc);
         }
     }
 
     private void translate(final File disc) {
-        ui.post(new Runnable() { public void run() {
+        onUi(new Runnable() { public void run() {
             showBusy("Translating the game for your phone…\n"
                     + "This happens once and takes a few seconds.", -1);
         } });
         final String err = nativeTranslate(dataDir.getPath(), disc.getPath(), EXE_SHA256);
         if (err == null) {
-            ui.post(new Runnable() { public void run() { startGame(disc); } });
+            onUi(new Runnable() { public void run() { startGame(disc); } });
         } else {
             deleteDisc();
-            ui.post(new Runnable() { public void run() { showError(err, true); } });
+            onUi(new Runnable() { public void run() { showError(err, true); } });
         }
     }
 
@@ -197,7 +204,7 @@ public class SetupActivity extends Activity {
         final Uri uri = chosen;
         final boolean chd = chosenName.endsWith(".chd");
         final long size = chosenSize;
-        worker.execute(new Runnable() { public void run() { importDisc(uri, chd, size); } });
+        WORKER.execute(new Runnable() { public void run() { importDisc(uri, chd, size); } });
     }
 
     private void importDisc(Uri uri, boolean chd, long size) {
@@ -221,7 +228,7 @@ public class SetupActivity extends Activity {
                     if (pct != lastPct) {
                         lastPct = pct;
                         final int p = pct;
-                        ui.post(new Runnable() { public void run() {
+                        onUi(new Runnable() { public void run() {
                             showBusy("Copying your disc image…", p);
                         } });
                     }
@@ -241,7 +248,7 @@ public class SetupActivity extends Activity {
             deleteDisc();
             final String msg = "Copying the disc image failed: " + e.getMessage()
                     + "\nCheck there is at least 500 MB of free space.";
-            ui.post(new Runnable() { public void run() { showError(msg, true); } });
+            onUi(new Runnable() { public void run() { showError(msg, true); } });
             return;
         }
         translate(currentDisc(dataDir));

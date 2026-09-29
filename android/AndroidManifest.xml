@@ -30,10 +30,13 @@
 
         <!-- Launcher: installs support files, imports the player's disc and
              translates the game once, then starts DigimonActivity. -->
+        <!-- Handles configuration changes itself: recreating it mid-way
+             through a disc copy or translation would start the work again. -->
         <activity
             android:name=".SetupActivity"
             android:label="@string/app_name"
             android:theme="@style/SetupTheme"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|keyboard|keyboardHidden|navigation|density|fontScale|layoutDirection|locale"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

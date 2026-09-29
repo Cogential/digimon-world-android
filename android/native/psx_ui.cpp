@@ -724,7 +724,10 @@ void load_fonts() {
 /* ---- shared with the menu --------------------------------------------------------- */
 
 void ui_save_settings() {
-    FILE *f = std::fopen(settings_path().c_str(), "w");
+    /* Write a temp file and rename it over the settings, so a crash while
+     * writing cannot leave a half-written file (and a lost layout). */
+    const std::string path = settings_path(), tmp = path + ".tmp";
+    FILE *f = std::fopen(tmp.c_str(), "w");
     if (!f) return;
     const UiSettings &s = g_ui.s;
     std::fprintf(f, "screen_fit=%d\n", s.screen_fit);
@@ -734,7 +737,9 @@ void ui_save_settings() {
                  s.show_fps ? 1 : 0, s.volume);
     for (int e = 0; e < EL_COUNT; e++)
         std::fprintf(f, "ctl_%s=%.4f,%.4f,%.3f\n", k_el_keys[e], s.ctl[e].dx, s.ctl[e].dy, s.ctl[e].scale);
-    std::fclose(f);
+    const bool ok = std::fflush(f) == 0 && !std::ferror(f);
+    if (std::fclose(f) == 0 && ok) std::rename(tmp.c_str(), path.c_str());
+    else std::remove(tmp.c_str());
 }
 
 void ui_set_menu_open(bool open) {

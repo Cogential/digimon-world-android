@@ -13,7 +13,8 @@ extern "C" {
 #endif
 
 /* main.cpp bridges */
-int      psx_host_savestate_submit(int slot, int save); /* 1 if queued */
+int      psx_host_savestate_submit(int slot, int save); /* 1 save, 0 load, 2 load despite
+                                                          other mods; 1 if queued */
 int      psx_host_video_smooth(void);
 void     psx_host_set_video_smooth(int on);
 int      psx_host_texture_filter(void);
@@ -29,6 +30,7 @@ void     psx_host_shutdown(void);       /* flush saves etc. before the process g
 /* savestate.c */
 int savestate_slot_exists(int slot);
 int savestate_slot_path(int slot, char *out, size_t cap);
+int savestate_slot_mods_match(int slot);   /* 1 same mods, 0 different, -1 unknown */
 
 /* host_osd.c */
 int  host_volume_get(void);

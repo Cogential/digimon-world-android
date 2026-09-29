@@ -113,6 +113,21 @@ index 0000000..4eab9d6
 +#endif
 +
 +#endif /* PSX_TRANSLATE_H */
+diff --git a/runtime/include/savestate.h b/runtime/include/savestate.h
+index 7d2a380..82d67b3 100644
+--- a/runtime/include/savestate.h
++++ b/runtime/include/savestate.h
+@@ -63,6 +63,10 @@ int savestate_write_slot(int slot, const void* data, size_t size);
+ 
+ /* 1 if the slot file exists and is non-empty. */
+ int savestate_slot_exists(int slot);
++/* 1 if the slot was saved under the current mod plan's patched ranges and
++ * plugins, 0 if under a different one (restoring it would carry that plan's
++ * patches over), -1 if unknown (saved before this was recorded). */
++int savestate_slot_mods_match(int slot);
+ 
+ /* Slot file modified time, seconds since the Unix epoch. */
+ int savestate_slot_mtime(int slot, int64_t* out_time);
 diff --git a/runtime/runtime.cmake b/runtime/runtime.cmake
 index 369989c..486584a 100644
 --- a/runtime/runtime.cmake
@@ -533,7 +548,7 @@ index 0fe0d27..4db4074 100644
      /* Let access violations reach the SEH filter with their faulting CONTEXT.
       * MinGW's SIGSEGV bridge discards EXCEPTION_POINTERS, reducing the report
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index e8e8328..f1768fb 100644
+index e8e8328..57bb79a 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -97,6 +97,12 @@ extern "C" void psx_game_codegen_forward_if_built(int argc, char** argv);
@@ -602,13 +617,54 @@ index e8e8328..f1768fb 100644
  
      /* Analog axes. Pinned-ANALOG folds the physical D-pad onto the left axes
       * (fold_dpad) so the D-pad still moves stick-only games; HYBRID feeds the
-@@ -5627,6 +5656,30 @@ static void savestate_menu_submit(int save) {
+@@ -5594,6 +5623,12 @@ static void savestate_menu_move(int delta) {
+     savestate_menu_sync_overlay();
+ }
+ 
++#if defined(PSX_HAS_UI_OVERLAY)
++/* Set while the in-game menu loads a state the player confirmed despite a
++ * different mod plan (psx_host_savestate_submit(slot, 2)). */
++static bool s_savestate_force_load = false;
++#endif
++
+ static int savestate_submit_slot(int slot, int save) {
+     if (!save && !savestate_slot_exists(slot)) {
+         char msg[32];
+@@ -5601,6 +5636,20 @@ static int savestate_submit_slot(int slot, int save) {
+         host_osd_push(msg, 1200);
+         return 0;
+     }
++#if defined(PSX_HAS_UI_OVERLAY)
++    /* A state taken under different Enhancements would bring their code
++     * patches back (a restore only reapplies the current plan's). The quick
++     * slots load without asking, so leave those to the menu, which explains
++     * and asks first. */
++    if (!save && !s_savestate_force_load && savestate_slot_mods_match(slot) == 0) {
++        char msg[128];
++        snprintf(msg, sizeof(msg),
++                 "Slot %d was saved with different Enhancements. "
++                 "Load it from the menu (Game).", slot + 1);
++        host_osd_push(msg, 2500);
++        return 0;
++    }
++#endif
+     if (!save)
+         savestate_input_guard_arm();
+     if (psx_netplay_active()) {
+@@ -5627,6 +5676,37 @@ static void savestate_menu_submit(int save) {
      }
  }
  
 +#if defined(PSX_HAS_UI_OVERLAY)
 +/* What the in-game overlay (psx_ui_host.h) may change in the runtime. */
++/* save: 1 save, 0 load, 2 load even if saved under a different mod plan. */
 +extern "C" int psx_host_savestate_submit(int slot, int save) {
++    if (save == 2) {
++        s_savestate_force_load = true;
++        const int rc = savestate_submit_slot(slot, 0);
++        s_savestate_force_load = false;
++        return rc;
++    }
 +    return savestate_submit_slot(slot, save);
 +}
 +extern "C" int psx_host_video_smooth(void) { return g_video_aa ? 1 : 0; }
@@ -633,7 +689,7 @@ index e8e8328..f1768fb 100644
  static int savestate_menu_slot_from_key(SDL_Keycode key) {
      if (key >= SDLK_1 && key <= SDLK_9)
          return (int)(key - SDLK_1);
-@@ -5805,11 +5858,41 @@ static void rewind_pause_present(void) {
+@@ -5805,11 +5885,41 @@ static void rewind_pause_present(void) {
              SDL_RenderCopy(sdl_renderer, sdl_texture, &s_sw_hold_src,
                             &s_sw_hold_dst);
          host_osd_draw_sdl(sdl_renderer);
@@ -675,7 +731,7 @@ index e8e8328..f1768fb 100644
  /* Freeze guest in vblank present while the rewind filmstrip is open. */
  static void rewind_host_pause_loop(void) {
      while (psx_rewind_is_open()) {
-@@ -5818,7 +5901,7 @@ static void rewind_host_pause_loop(void) {
+@@ -5818,7 +5928,7 @@ static void rewind_host_pause_loop(void) {
              if (ev.type == SDL_QUIT) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
@@ -684,7 +740,7 @@ index e8e8328..f1768fb 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -5856,7 +5939,7 @@ static void savestate_menu_host_pause_loop(void) {
+@@ -5856,7 +5966,7 @@ static void savestate_menu_host_pause_loop(void) {
              if (ev.type == SDL_QUIT) {
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
@@ -693,7 +749,7 @@ index e8e8328..f1768fb 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6061,7 +6144,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6061,7 +6171,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  }
                  psx_crash_trace_set_exit_origin("sdl_window_close");
                  shutdown_runtime();
@@ -702,7 +758,7 @@ index e8e8328..f1768fb 100644
              } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                  refresh_player_devices();
              } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-@@ -6155,6 +6238,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6155,6 +6265,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
              savestate_menu_host_pause_loop();
          if (psx_rewind_is_open())
              rewind_host_pause_loop();
@@ -713,7 +769,7 @@ index e8e8328..f1768fb 100644
      }
  
      /* Sample each player's device and feed the matching SIO pad slot.
-@@ -6313,8 +6400,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6313,8 +6427,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
       * Rollback resim: skip host audio pump (uncapped frames) so SPU/CD audio
       * paths cannot fork peers during the episode window. */
      if (!psx_netplay_is_resimulating() && !psx_selfcheck_resim_active()) {
@@ -731,7 +787,7 @@ index e8e8328..f1768fb 100644
      }
  #endif
  
-@@ -6375,6 +6470,32 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6375,6 +6497,32 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          }
      }
  
@@ -764,7 +820,7 @@ index e8e8328..f1768fb 100644
      /* Turbo-through-loads (step 4, OPT-IN via game.toml [runtime]
       * turbo_loads): while the game is loading — CD data stream active,
       * XA/FMV excluded, post-BIOS-handoff only — skip wall-clock pacing and
-@@ -6954,10 +7075,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6954,10 +7102,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      SDL_RenderClear(sdl_renderer);
      SDL_RenderCopy(sdl_renderer, sdl_texture, &src, &dst);
      host_osd_draw_sdl(sdl_renderer);
@@ -779,7 +835,7 @@ index e8e8328..f1768fb 100644
  
      /* Vsync self-heal. PRESENTVSYNC is only armed when driver vsync owns
       * cadence; the wall-clock pacer otherwise holds 59.94 Hz. Under some
-@@ -10370,7 +10495,19 @@ namespace {
+@@ -10370,7 +10522,19 @@ namespace {
  }  // namespace
  #endif
  
@@ -789,17 +845,17 @@ index e8e8328..f1768fb 100644
 + * that, so psx_android_main() sets up the app (data directory, payload,
 + * logging) and then runs the real entry point on a thread of its own. */
 +static int psx_runtime_main(int argc, char** argv);
-+int main(int argc, char** argv) {
+ int main(int argc, char** argv) {
 +    return psx_android_main(psx_runtime_main, argc, argv);
 +}
 +static int psx_runtime_main(int argc, char** argv) {
 +#else
- int main(int argc, char** argv) {
++int main(int argc, char** argv) {
 +#endif
      /* Force line-buffered output so messages appear even if killed. */
      std::setvbuf(stdout, nullptr, _IOLBF, 0);
      std::setvbuf(stderr, nullptr, _IOLBF, 0);
-@@ -10391,6 +10528,22 @@ int main(int argc, char** argv) {
+@@ -10391,6 +10555,22 @@ int main(int argc, char** argv) {
      /* Install crash handlers early so they catch issues during init too.
       * Writes psx_last_run_report.json on signal/SEH/atexit/fail-fast. */
      psx_crash_trace_install_handlers();
@@ -822,7 +878,7 @@ index e8e8328..f1768fb 100644
  #if defined(RECOMP_LAUNCHER)
      launcher_boot_timing_mark("host:crash_handlers");
  #endif
-@@ -11019,6 +11172,32 @@ int main(int argc, char** argv) {
+@@ -11019,6 +11199,45 @@ int main(int argc, char** argv) {
  #if defined(RECOMP_LAUNCHER)
      launcher_boot_timing_mark("host:game_config_done");
  #endif
@@ -846,6 +902,19 @@ index e8e8328..f1768fb 100644
 +                         gen_dir.empty() ? "no generated/ directory" : "",
 +                         tcc_dir.empty() ? " no tcc/ headers" : "",
 +                         dyn_err[0] ? dyn_err : "see above");
++            /* Drop the translation's stamp so the next launch translates the
++             * disc again instead of failing the same way forever, and tell
++             * the player rather than just vanishing. */
++            if (!gen_dir.empty()) {
++                std::error_code ec;
++                std::filesystem::remove(gen_dir / ".translated", ec);
++            }
++            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Digimon World",
++                "The game could not be prepared from your disc. It will be "
++                "translated again the next time you open the app.\n\n"
++                "If this keeps happening, the details are in log.txt in the "
++                "app's folder (Android/data/com.cogent.digimonworld/files).",
++                nullptr);
 +            return 1;
 +        }
 +        std::fprintf(stdout, "psxrecomp: game compiled in %llu ms\n",
@@ -855,7 +924,7 @@ index e8e8328..f1768fb 100644
  
      if (!game_name.empty()) s_picker_game_name = game_name;
  
-@@ -12773,6 +12952,9 @@ session_reboot:
+@@ -12773,6 +12992,9 @@ session_reboot:
              return 1;
          }
      }
@@ -865,7 +934,7 @@ index e8e8328..f1768fb 100644
      load_input_config(argv[0]);
      /* The launcher / settings.toml / game.toml deadzone (when set) is the
       * user-facing authority; apply it over the input.ini value here, after
-@@ -12832,6 +13014,11 @@ session_reboot:
+@@ -12832,6 +13054,11 @@ session_reboot:
       * borderless desktop fullscreen (keeps the desktop resolution, letterboxes
       * the image), 2 = exclusive fullscreen (real display-mode change), 0 =
       * windowed. Matches the in-game Alt+Enter / Cmd+Ctrl+F hotkey behaviour. */
@@ -877,7 +946,7 @@ index e8e8328..f1768fb 100644
      win_flags |= psx_fullscreen_flag_for_mode(g_fullscreen);
      /* Open at the user-chosen window size (default 1280 wide) instead of the
       * old hardcoded 640x480, so the game doesn't boot into a tiny window. The
-@@ -13037,6 +13224,10 @@ session_reboot:
+@@ -13037,6 +13264,10 @@ session_reboot:
    }
      log_present_cadence();
    }
@@ -889,10 +958,20 @@ index e8e8328..f1768fb 100644
      /* Register vblank presentation callback. */
      gpu_set_vblank_callback(sdl_vblank_present);
 diff --git a/runtime/src/memcard.c b/runtime/src/memcard.c
-index 215f17f..62786b3 100644
+index 215f17f..74a46c6 100644
 --- a/runtime/src/memcard.c
 +++ b/runtime/src/memcard.c
-@@ -245,6 +245,25 @@ void memcard_flush(int card) {
+@@ -12,6 +12,9 @@
+  *   - No fake events found (clean)
+  */
+ 
++#if defined(__ANDROID__)
++#include <unistd.h>   /* fsync */
++#endif
+ #include "memcard.h"
+ #include <stdio.h>
+ #include <string.h>
+@@ -245,6 +248,27 @@ void memcard_flush(int card) {
      if (!cards[card].dirty) return;
      if (cards[card].filepath[0] == '\0') return;
  
@@ -905,7 +984,9 @@ index 215f17f..62786b3 100644
 +    FILE* f = fopen(tmp, "wb");
 +    if (f) {
 +        size_t n = fwrite(cards[card].data, 1, MEMCARD_SIZE, f);
-+        int flush_ok = (fflush(f) == 0);
++        /* Reach the disk before the rename, or a power cut right after it
++         * could leave the renamed card empty. */
++        int flush_ok = (fflush(f) == 0) && (fsync(fileno(f)) == 0);
 +        int close_ok = (fclose(f) == 0);
 +        if (n == MEMCARD_SIZE && flush_ok && close_ok &&
 +            rename(tmp, cards[card].filepath) == 0) {
@@ -918,7 +999,7 @@ index 215f17f..62786b3 100644
      FILE* f = fopen(cards[card].filepath, "wb");
      if (f) {
          size_t n = fwrite(cards[card].data, 1, MEMCARD_SIZE, f);
-@@ -254,6 +273,7 @@ void memcard_flush(int card) {
+@@ -254,6 +278,7 @@ void memcard_flush(int card) {
              cards[card].dirty = 0;
          }
      }
@@ -941,12 +1022,69 @@ index 8785b7e..31b464c 100644
          else if (strcmp(text, "4:3")   == 0) { num = 4;  den = 3;  }
      }
      psx_ws_engage_aspect(num, den);
+diff --git a/runtime/src/mod_runtime.cpp b/runtime/src/mod_runtime.cpp
+index c84f0f9..84bf1ca 100644
+--- a/runtime/src/mod_runtime.cpp
++++ b/runtime/src/mod_runtime.cpp
+@@ -1154,6 +1154,52 @@ extern "C" const char *mod_runtime_fingerprint_c(void) {
+     return mod_runtime_fingerprint().c_str();
+ }
+ 
++/* What a savestate carries over from the mod plan it was taken under: every
++ * byte range a patch rewrote (code and data in guest RAM, and overlay code
++ * loaded from patched disc sectors) plus the plugins that shaped memory. A
++ * restore reapplies the current plan's patches, but ranges only an older plan
++ * patched stay patched, so a state is only clean to load under a plan with the
++ * same ranges and plugins. Option values are left out on purpose: they only
++ * change bytes the current plan rewrites anyway (and aspect-style plugin
++ * options change no RAM at all). */
++extern "C" const char *mod_runtime_state_fingerprint_c(void) {
++    using namespace PSXRecompV4;
++    static std::string cached;
++    RuntimeMods& s = state();
++    if (!s.initialized || !s.plan.ok) return "none";
++    if (cached.empty()) {
++        uint64_t h = 1469598103934665603ull;   /* FNV-1a */
++        auto mix = [&h](const void* p, size_t n) {
++            const uint8_t* b = static_cast<const uint8_t*>(p);
++            for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
++        };
++        std::vector<std::string> ranges;
++        for (const ModResolution::Write& w : s.plan.writes) {
++            char buf[64];
++            if (w.fields.empty()) {
++                std::snprintf(buf, sizeof(buf), "%d:%llx+%zu", (int)w.target,
++                              (unsigned long long)w.location, w.replacement.size());
++                ranges.push_back(buf);
++            }
++            for (const ModResolution::Write::Field& f : w.fields) {
++                std::snprintf(buf, sizeof(buf), "%d:%llx+%zu", (int)w.target,
++                              (unsigned long long)(w.location + f.offset),
++                              f.replacement.size());
++                ranges.push_back(buf);
++            }
++        }
++        for (const ModResolution::Plugin& plugin : s.plan.plugins)
++            ranges.push_back("plugin:" + plugin.id);
++        std::sort(ranges.begin(), ranges.end());
++        ranges.erase(std::unique(ranges.begin(), ranges.end()), ranges.end());
++        for (const std::string& r : ranges) mix(r.c_str(), r.size() + 1);
++        char out[24];
++        std::snprintf(out, sizeof(out), "%016llx", (unsigned long long)h);
++        cached = out;
++    }
++    return cached.c_str();
++}
++
+ const std::filesystem::path& mod_runtime_effective_disc_path() {
+     return state().effective_disc_path;
+ }
 diff --git a/runtime/src/psx_android.cpp b/runtime/src/psx_android.cpp
 new file mode 100644
-index 0000000..0803c56
+index 0000000..cbc54a6
 --- /dev/null
 +++ b/runtime/src/psx_android.cpp
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,329 @@
 +/*
 + * psx_android.cpp — Android host glue, run from the top of main().
 + *
@@ -983,6 +1121,7 @@ index 0000000..0803c56
 +#include <sys/stat.h>
 +#include <unistd.h>
 +
++#include <mutex>
 +#include <string>
 +#include <vector>
 +
@@ -1243,10 +1382,19 @@ index 0000000..0803c56
 +extern "C" JNIEXPORT jstring JNICALL
 +Java_com_cogent_digimonworld_SetupActivity_nativeTranslate(
 +        JNIEnv* env, jclass, jstring data_dir, jstring disc_path, jstring exe_sha256) {
++    /* One translation at a time: two would write the same files (and the
++     * recompiler keeps global state). A second caller waits, then finds the
++     * work done. */
++    static std::mutex s_translate_mutex;
++    std::lock_guard<std::mutex> lock(s_translate_mutex);
 +    g_data_dir = jstr(env, data_dir);
 +    redirect_stdio_to_log();
 +    const std::string disc = jstr(env, disc_path);
 +    const std::string sha = jstr(env, exe_sha256);
++    if (psx_translate_is_current(g_data_dir.c_str(), sha.c_str())) {
++        alog("setup: already translated");
++        return nullptr;
++    }
 +    alog("setup: translating %s", disc.c_str());
 +    char err[1024] = {0};
 +    const int rc = psx_translate_disc(g_data_dir.c_str(), disc.c_str(), sha.c_str(),
@@ -1769,10 +1917,10 @@ index a379eca..65cb1dd 100644
  #ifndef _XOPEN_SOURCE
 diff --git a/runtime/src/psx_translate.cpp b/runtime/src/psx_translate.cpp
 new file mode 100644
-index 0000000..ba26eeb
+index 0000000..268ab4a
 --- /dev/null
 +++ b/runtime/src/psx_translate.cpp
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,193 @@
 +/*
 + * psx_translate.cpp — translate the player's own disc into C, in-process.
 + *
@@ -1796,6 +1944,7 @@ index 0000000..ba26eeb
 +#include <cstring>
 +#include <filesystem>
 +#include <fstream>
++#include <iterator>
 +#include <string>
 +#include <vector>
 +
@@ -1827,6 +1976,27 @@ index 0000000..ba26eeb
 +    std::string s;
 +    for (size_t i = 0; i < n; i++) { s += k[d[i] >> 4]; s += k[d[i] & 15]; }
 +    return s;
++}
++
++/* The files besides the disc that decide what the recompiler writes: its
++ * configuration (game.toml: seeds, the functions mods hook, ...), the function
++ * seeds and the BIOS profile. An app update that changes any of them must
++ * re-translate, just as a new recompiler does. */
++std::string inputs_digest(const std::filesystem::path& root) {
++    static const char* const k_inputs[] = {
++        "game.toml", "seeds/ghidra_funcs.txt", "bios/SCPH1001.toml" };
++    psx_sha256_ctx ctx;
++    psx_sha256_init(&ctx);
++    for (const char* rel : k_inputs) {
++        std::ifstream f(root / rel, std::ios::binary);
++        const std::string data((std::istreambuf_iterator<char>(f)),
++                               std::istreambuf_iterator<char>());
++        psx_sha256_update(&ctx, (const uint8_t*)rel, std::strlen(rel) + 1);
++        psx_sha256_update(&ctx, (const uint8_t*)data.data(), data.size());
++    }
++    uint8_t digest[32];
++    psx_sha256_final(&ctx, digest);
++    return "in-" + to_hex(digest, 8);
 +}
 +
 +bool read_disc_file(PS1::ISOReader& iso, const std::string& name,
@@ -1927,20 +2097,81 @@ index 0000000..ba26eeb
 +    }
 +    /* Stamp what was translated, so a changed disc or a newer recompiler
 +     * triggers a fresh translation (psx_translate_is_current). */
-+    const std::string stamp = exe_sha + "\n" + translate_version() + "\n";
++    const std::string stamp = exe_sha + "\n" + translate_version() + "\n" +
++                              inputs_digest(root) + "\n";
 +    write_file(root / "generated" / ".translated", stamp.data(), stamp.size());
 +    return 0;
 +}
 +
 +extern "C" int psx_translate_is_current(const char* data_dir,
 +                                        const char* expect_exe_sha256) {
-+    std::ifstream f(std::filesystem::path(data_dir) / "generated" / ".translated");
-+    std::string sha, version;
-+    if (!std::getline(f, sha) || !std::getline(f, version)) return 0;
++    const std::filesystem::path root(data_dir);
++    std::ifstream f(root / "generated" / ".translated");
++    std::string sha, version, inputs;
++    if (!std::getline(f, sha) || !std::getline(f, version) || !std::getline(f, inputs))
++        return 0;
 +    if (expect_exe_sha256 && expect_exe_sha256[0] && sha != expect_exe_sha256)
 +        return 0;
-+    return version == translate_version();
++    return version == translate_version() && inputs == inputs_digest(root);
 +}
+diff --git a/runtime/src/savestate.c b/runtime/src/savestate.c
+index f2f753e..fd0e619 100644
+--- a/runtime/src/savestate.c
++++ b/runtime/src/savestate.c
+@@ -386,6 +386,37 @@ static int savestate_thumb_path(int slot, char* out, size_t cap) {
+     return 1;
+ }
+ 
++/* Each state is accompanied by <state>.mods: the fingerprint of the mod
++ * plan it was taken under (mod_runtime_state_fingerprint_c), so a front end
++ * can tell whether restoring it would bring back patches the current plan no
++ * longer has. */
++extern const char *mod_runtime_state_fingerprint_c(void);
++
++static void write_mods_sidecar(const char* state_path) {
++    char p[640];
++    FILE* f;
++    snprintf(p, sizeof(p), "%s.mods", state_path);
++    f = fopen(p, "wb");
++    if (!f) return;
++    fputs(mod_runtime_state_fingerprint_c(), f);
++    fclose(f);
++}
++
++int savestate_slot_mods_match(int slot) {
++    char path[600], p[640], buf[64];
++    FILE* f;
++    size_t n;
++    if (!savestate_slot_path(slot, path, sizeof(path))) return -1;
++    snprintf(p, sizeof(p), "%s.mods", path);
++    f = fopen(p, "rb");
++    if (!f) return -1;
++    n = fread(buf, 1, sizeof(buf) - 1, f);
++    fclose(f);
++    buf[n] = '\0';
++    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
++    return strcmp(buf, mod_runtime_state_fingerprint_c()) == 0 ? 1 : 0;
++}
++
+ int savestate_slot_exists(int slot) {
+     char path[600];
+     FILE* f;
+@@ -569,6 +600,7 @@ int savestate_write_slot(int slot, const void* data, size_t size) {
+         remove(path);
+         return 0;
+     }
++    write_mods_sidecar(path);
+     return 1;
+ }
+ 
+@@ -752,6 +784,7 @@ void savestate_poll(CPUState* cpu, uint32_t resume_pc) {
+                 if (ok) {
+                     s_last_save_pc = pc;
+                     s_save_failed = 0;
++                    write_mods_sidecar(path);
+                     (void)savestate_capture_thumb(slot);
+                 } else {
+                     s_last_save_pc = 0;
 diff --git a/runtime/third_party/tcc_libc/stdint.h b/runtime/third_party/tcc_libc/stdint.h
 new file mode 100644
 index 0000000..f15ca7a
