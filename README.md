@@ -24,8 +24,8 @@ each time the game starts.
   control, each face button included, can be moved and resized (Controls >
   Move and resize controls), and reset to the default layout.
 - Bluetooth controllers (Xbox, PlayStation, ...), picked up at any time.
-- An in-game menu in the spirit of Ship of Harkinian, opened with the menu
-  button, Android's back gesture, or Select+Start on a pad:
+- An in-game menu, open with the menubutton, Android's back gesture,
+- or Select+Start on a pad:
   - **Game**: 12 save-state slots, game speed 0.5x-4x, fast-forward, FPS counter
   - **Graphics**: widescreen aspect, fill screen, internal resolution,
     filtering, colour model
